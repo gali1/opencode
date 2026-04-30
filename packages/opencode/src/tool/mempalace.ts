@@ -246,7 +246,7 @@ export const MempalaceTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
-      execute: (params, ctx) =>
+      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const ins = yield* InstanceState.context
 
@@ -279,7 +279,7 @@ export const MempalaceTool = Tool.define(
           } catch (err) {
             return {
               title: "MemPalace Error",
-              metadata: { operation: params.operation, error: true },
+              metadata: { operation: params.operation, error: true, raw: null },
               output: `Failed to start mempalace bridge: ${err}\n\nEnsure mempalace is installed: pip install mempalace`,
             }
           }
@@ -295,7 +295,7 @@ export const MempalaceTool = Tool.define(
           } catch (err) {
             return {
               title: "MemPalace Error",
-              metadata: { operation: params.operation, error: true },
+              metadata: { operation: params.operation, error: true, raw: null },
               output: `MemPalace operation '${params.operation}' failed: ${err}`,
             }
           }
@@ -452,7 +452,7 @@ export const MempalaceTool = Tool.define(
 
           return {
             title,
-            metadata: { operation: params.operation, raw },
+            metadata: { operation: params.operation, error: false, raw },
             output,
           }
         }).pipe(Effect.orDie),
