@@ -97,6 +97,44 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
+### Persistent Memory (MemPalace)
+
+OpenCode includes built-in support for [MemPalace](https://github.com/anomalyco/mempalace) — a local-first, semantic memory system that gives agents persistent recall across sessions.
+
+Without MemPalace, each session starts from scratch. With it, agents can remember prior decisions, architecture patterns, discovered bugs, and reasoning traces — and retrieve them instantly via semantic search instead of re-reading your entire codebase.
+
+#### What it does
+
+- **Semantic search** — agents query past context by meaning, not just keywords
+- **Knowledge graph** — tracks entity relationships (e.g., "AuthService depends on DatabasePool")
+- **Session diary** — agents log what they worked on, enabling continuity across sessions
+- **Project-scoped** — each project gets isolated memory, stored locally under `~/.local/share/opencode/`
+
+#### Setup
+
+MemPalace requires Python 3.12+ and is installed separately:
+
+```bash
+pip install mempalace
+```
+
+That's it. No configuration needed — OpenCode detects and initializes it automatically on first use.
+
+> [!NOTE]
+> MemPalace is optional. OpenCode works exactly the same without it — agents simply won't have cross-session memory. If `mempalace` is not installed, the tool reports a clear error on first use and all other tools continue to function normally.
+
+#### Permissions
+
+By default, the agent will ask before using MemPalace operations. To allow all memory operations without prompts, add to your config:
+
+```json
+{
+  "permissions": {
+    "mempalace": "allow"
+  }
+}
+```
+
 ### Agents
 
 OpenCode includes two built-in agents you can switch between with the `Tab` key.
@@ -135,6 +173,7 @@ It's very similar to Claude Code in terms of capability. Here are the key differ
 - Out-of-the-box LSP support
 - A focus on TUI. OpenCode is built by neovim users and the creators of [terminal.shop](https://terminal.shop); we are going to push the limits of what's possible in the terminal.
 - A client/server architecture. This, for example, can allow OpenCode to run on your computer while you drive it remotely from a mobile app, meaning that the TUI frontend is just one of the possible clients.
+- Persistent cross-session memory via MemPalace. Agents remember what they learned, reducing redundant context and token usage over time.
 
 ---
 
