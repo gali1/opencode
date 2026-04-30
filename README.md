@@ -135,18 +135,23 @@ rm -f "$HOME/.opencode/bin/opencode" "$HOME/bin/opencode" "$HOME/.local/bin/open
 > [!IMPORTANT]
 > You must remove the existing installation first. Running `npm link` while the official package is still installed globally can cause conflicts where the system continues to resolve the old binary.
 
-#### Build and link globally
+#### Link globally
 
 ```bash
-# Build all packages
-bun run build
-
-# Link the CLI globally so `opencode` resolves to your local build
+# From the repo root — link the CLI so `opencode` resolves to your local source
 cd packages/opencode
-npm link
+bun link
 ```
 
-After this, the `opencode` command anywhere on your system runs your local build.
+If `bun link` does not place the binary on your `$PATH`, create a wrapper manually:
+
+```bash
+# Adjust the path to wherever your clone lives
+echo '#!/bin/sh
+exec bun run /home/$USER/opencode/packages/opencode/src/index.ts "$@"' \
+  | sudo tee /usr/local/bin/opencode > /dev/null
+sudo chmod +x /usr/local/bin/opencode
+```
 
 #### Verify
 
@@ -154,7 +159,7 @@ After this, the `opencode` command anywhere on your system runs your local build
 # Should print the version from your local source
 opencode --version
 
-# Should resolve to your cloned repo, not a global npm path
+# Should resolve to your local wrapper or bun link path
 which opencode
 ```
 
@@ -183,7 +188,6 @@ Without this, OpenCode still works — agents just won't have persistent memory.
 cd /path/to/opencode
 git pull
 bun install
-bun run build
 ```
 
 The global `opencode` command automatically picks up the new build since `npm link` creates a symlink.
@@ -193,7 +197,10 @@ The global `opencode` command automatically picks up the new build since `npm li
 ```bash
 # Remove the source link
 cd /path/to/opencode/packages/opencode
-npm unlink
+bun unlink
+
+# If you created the manual wrapper
+sudo rm /usr/local/bin/opencode
 
 # Reinstall the official release
 npm i -g opencode-ai@latest
