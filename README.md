@@ -97,6 +97,108 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
+### Building from Source
+
+If you want to run this fork (with MemPalace integration) instead of the official release, build and install from source. This replaces any existing `opencode` command on your system.
+
+#### Prerequisites
+
+- [Bun](https://bun.sh) v1.1+ (`curl -fsSL https://bun.sh/install | bash`)
+- [Node.js](https://nodejs.org) v20+ (for `npm link`)
+- [Python](https://python.org) 3.12+ (for MemPalace support)
+- Git
+
+#### Clone and install
+
+```bash
+git clone https://github.com/gali1/opencode.git
+cd opencode
+bun install
+```
+
+#### Remove existing OpenCode (if installed)
+
+```bash
+# npm
+npm uninstall -g opencode-ai
+
+# Homebrew
+brew uninstall opencode
+
+# Scoop
+scoop uninstall opencode
+
+# Manual install (curl script)
+rm -f "$HOME/.opencode/bin/opencode" "$HOME/bin/opencode" "$HOME/.local/bin/opencode"
+```
+
+> [!IMPORTANT]
+> You must remove the existing installation first. Running `npm link` while the official package is still installed globally can cause conflicts where the system continues to resolve the old binary.
+
+#### Build and link globally
+
+```bash
+# Build all packages
+bun run build
+
+# Link the CLI globally so `opencode` resolves to your local build
+cd packages/opencode
+npm link
+```
+
+After this, the `opencode` command anywhere on your system runs your local build.
+
+#### Verify
+
+```bash
+# Should print the version from your local source
+opencode --version
+
+# Should resolve to your cloned repo, not a global npm path
+which opencode
+```
+
+#### Run without global install (alternative)
+
+If you prefer not to replace the global command, run directly from source:
+
+```bash
+cd /path/to/opencode
+bun run packages/opencode/src/index.ts
+```
+
+This leaves any existing global `opencode` installation untouched.
+
+#### Install MemPalace
+
+```bash
+pip install mempalace
+```
+
+Without this, OpenCode still works — agents just won't have persistent memory.
+
+#### Updating
+
+```bash
+cd /path/to/opencode
+git pull
+bun install
+bun run build
+```
+
+The global `opencode` command automatically picks up the new build since `npm link` creates a symlink.
+
+#### Reverting to the official release
+
+```bash
+# Remove the source link
+cd /path/to/opencode/packages/opencode
+npm unlink
+
+# Reinstall the official release
+npm i -g opencode-ai@latest
+```
+
 ### Persistent Memory (MemPalace)
 
 OpenCode includes built-in support for [MemPalace](https://github.com/anomalyco/mempalace) — a local-first, semantic memory system that gives agents persistent recall across sessions.
