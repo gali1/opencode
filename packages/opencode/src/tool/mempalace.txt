@@ -1,0 +1,50 @@
+Search, store, and retrieve persistent AI memory using MemPalace — a local, semantic memory system that persists across sessions.
+
+## When to use this tool
+
+Use this tool proactively to:
+- Recall prior decisions, architecture choices, or discoveries made in previous sessions
+- Store significant findings, code patterns, or reasoning conclusions immediately after reaching them
+- Track entity relationships (e.g., "ServiceA depends_on ServiceB") in the knowledge graph
+- Log structured diary entries at the start and end of major tasks
+
+## Operations
+
+- search: Find semantically similar stored memories. Use before reconstructing context from scratch.
+- store: Save verbatim content. Store code snippets, decisions, file summaries, error patterns.
+- status: Check palace health and stored memory count.
+- list_wings: See all project namespaces.
+- list_rooms: See all topic areas within a wing.
+- kg_add: Assert an entity relationship with optional confidence score.
+- kg_query: Query all known relations for an entity.
+- kg_invalidate: Remove an incorrect or outdated knowledge graph assertion.
+- diary_write: Log a timestamped entry for session continuity.
+- diary_read: Read recent diary entries to understand prior session state.
+
+## Validation requirement (critical)
+
+NEVER blindly trust retrieved memory. Always:
+1. Check whether the memory is consistent with current file state.
+2. Cross-reference against other known facts.
+3. If uncertain, use other tools (read, glob) to verify current state before relying on memory.
+
+## Wings and Rooms
+
+Organize memories into wings (project namespaces) and rooms (topic areas):
+- wing: "project" for general project memories (default)
+- wing: "tests" for test-related memories
+- room: "architecture", "bugs", "decisions", "dependencies", "api", etc.
+
+## Progressive trust model
+
+- Early in a session: validate heavily, use memory as a hint.
+- Mid-session: balance memory with current tool outputs.
+- After verification: trust established memories as primary source.
+
+## Usage tips
+
+- Store immediately after making a significant discovery or decision — don't wait.
+- Use diary_write at the start and end of multi-step tasks for session continuity.
+- Use kg_add for persistent entity relationships (e.g., "AuthService depends_on DatabasePool").
+- Prefer specific wing/room filters when searching to improve result relevance.
+- You have the capability to call multiple tools in a single response. Speculatively search memory while also reading files.
