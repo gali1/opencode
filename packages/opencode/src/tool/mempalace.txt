@@ -1,79 +1,110 @@
-Search, store, and retrieve persistent AI memory using MemPalace — a local, semantic memory system that persists across sessions.
+Persistent AI memory system combining MemPalace (structured verbatim storage, knowledge graph) with Rekal (typed memories, lifecycle management, hybrid search with configurable weights).
 
-## When to use this tool
+## Session Start — Do This First
 
-Use this tool proactively to:
-- Recall prior decisions, architecture choices, or discoveries made in previous sessions
-- Store significant findings, code patterns, or reasoning conclusions immediately after reaching them
-- Track entity relationships (e.g., "ServiceA depends_on ServiceB") in the knowledge graph
-- Log structured diary entries at the start and end of major tasks
-- Verify facts before stating them confidently
-- Check for contradictions before adding new knowledge
+Call build_context with your current task before exploring the codebase. This loads relevant memories, conflicts, and timeline in one call.
 
-## Operations
+## Two Memory Layers
 
-### Retrieval
-- search: Standard semantic search over stored memories. Good for small palaces.
-- smart_search: Adaptive two-phase retrieval that scales to large palaces (thousands of memories). Automatically adjusts candidate pool size, expands queries using knowledge graph entities, applies recency weighting, and deduplicates results. PREFER this over search when the palace has more than a few hundred memories.
+### Layer 1: MemPalace (drawers — verbatim storage)
+- search: Semantic search over stored drawers
+- store: File verbatim content into a wing/room
+- status, list_wings, list_rooms: Palace overview
+- kg_add, kg_query, kg_invalidate: Knowledge graph entity relationships
+- diary_write, diary_read: Session diary
 
-### Storage
-- store: Save verbatim content. Store code snippets, decisions, file summaries, error patterns.
+### Layer 2: Rekal Engine (structured memories with lifecycle)
+- memory_store: Store a typed, tagged, project-scoped memory
+- memory_search: Hybrid search (BM25 + vector + recency) with configurable weights
+- memory_update: Edit content, tags, or type of an existing memory
+- memory_delete: Remove a memory by ID
+- memory_supersede: Replace a memory while preserving history via links. ALWAYS prefer this over delete + store.
+- memory_link: Connect memories (supersedes, contradicts, related_to)
+- build_context: One call that returns relevant memories + conflicts + timeline. USE THIS AT SESSION START.
+- memory_conflicts: Find contradicting memory pairs
+- memory_health: Database stats (counts by type, project, active vs superseded)
+- memory_similar: Find memories similar to a given one
+- memory_topics: Topic summary grouped by type
+- memory_timeline: Chronological view with optional date range
+- memory_related: All links to and from a memory
+- set_config: Set per-project scoring weights (w_fts, w_vec, w_recency, half_life)
 
-### Palace info
-- status: Check palace health, total memory count, and storage statistics.
-- list_wings: See all project namespaces.
-- list_rooms: See all topic areas within a wing.
+### Verification
+- contradiction_check: Check if a statement contradicts existing KG facts. Use BEFORE kg_add.
+- fact_check: Validate a claim against KG + stored memories. Returns confidence and verdict.
+- multi_hop: Find indirect entity relationships via BFS through the knowledge graph.
 
-### Knowledge graph
-- kg_add: Assert an entity relationship with optional confidence score.
-- kg_query: Query all known relations for an entity.
-- kg_invalidate: Remove an incorrect or outdated knowledge graph assertion.
+## When to Use Which Layer
 
-### Verification (critical for accuracy)
-- contradiction_check: Before storing a new fact or making a claim, check if it contradicts existing knowledge. Provide the statement to check via the 'statement' parameter. Optionally scope to a specific entity. Returns a verdict: no_contradictions, possible_contradictions, or strong_contradictions.
-- fact_check: Validate a claim against both the knowledge graph and stored memories. Provide the claim via the 'claim' parameter. Returns a confidence score (0.0–1.0) and verdict: supported, partially_supported, unverified, or contradicted. Use this before relying on a memory you're uncertain about.
+Use **Rekal engine** (memory_store, memory_search, memory_supersede) for:
+- User preferences and decisions
+- Architecture and conventions discovered during work
+- Procedures and workflows
+- Any knowledge that should survive across sessions
 
-### Graph traversal
-- multi_hop: Find indirect relationships between entities through the knowledge graph. Provide start entity via 'entity' and optional target via 'target'. Uses BFS up to 'depth' hops (default 3, max 6). Without a target, returns all reachable entities. With a target, returns all paths between them.
+Use **MemPalace native** (store, search) for:
+- Verbatim conversation content
+- Raw file summaries and code snippets
+- Content that benefits from MemPalace's wing/room hierarchy
 
-### Session diary
-- diary_write: Log a timestamped entry for session continuity.
-- diary_read: Read recent diary entries to understand prior session state.
+Use **build_context** at session start — it searches the Rekal engine and returns everything in one call.
 
-## Validation requirement (critical)
+## Storing Memories — Critical Rules
+
+### ALWAYS search before storing
+```
+1. memory_search(query="<topic>", limit=5)
+2. Read results:
+   - Exact duplicate → do nothing
+   - Same topic, outdated → memory_supersede(old_id="<id>", content="<new>")
+   - Same topic, contradicts → memory_supersede(old_id="<id>", content="<corrected>")
+   - No match → memory_store(content="<fact>", memory_type="<type>", tags=[...])
+```
+Two memories about the same topic must NEVER coexist. Supersede, don't duplicate.
+
+### Distill before storing
+NEVER store raw dialogue. Extract the durable fact, compress it.
+- Drop: articles, filler, hedging, pleasantries
+- Keep: technical terms, proper nouns, versions, reasons, causality
+- One memory = one distilled fact, 1-2 sentences max
+
+### memory_type values
+- fact: Objective truth about code/systems/APIs
+- preference: How user wants things done
+- procedure: Step-by-step workflow
+- context: Current project state (decays via recency scoring)
+- episode: Notable event, debugging session
+
+### tags: 2-4 specific tags, never generic ("code", "project")
+
+## Hybrid Search Scoring
+
+memory_search combines three signals:
+- BM25 keyword relevance (w_fts, default 0.4)
+- Vector semantic similarity (w_vec, default 0.4)
+- Recency decay (w_recency, default 0.2, half_life 30 days)
+
+Override per-search: memory_search(query="...", w_fts=0.8, w_vec=0.1, w_recency=0.1)
+Override per-project: set_config(project="myproj", key="w_fts", value="0.6")
+
+## Validation (critical)
 
 NEVER blindly trust retrieved memory. Always:
-1. Use fact_check on claims you're uncertain about before stating them.
-2. Use contradiction_check before storing new facts to catch conflicts.
-3. Cross-reference memory against current file state when memory age is unknown.
-4. If a memory contradicts current code, trust the code — the memory may be stale.
+1. Use fact_check on claims you're uncertain about
+2. Use contradiction_check BEFORE kg_add or memory_store
+3. Cross-reference against current file state when memory age is unknown
+4. If memory contradicts current code, trust the code
 
-## Retrieval strategy
+## What NOT to Store
 
-- For small palaces (<500 memories): use search — it's fast enough.
-- For medium/large palaces (500+): use smart_search — it adapts candidate pool size, applies recency weighting, and deduplicates automatically.
-- When searching for entity-related context: smart_search expands your query using knowledge graph relationships, improving recall on entity-centric queries.
-- Always prefer smart_search when you don't know how large the palace is.
+- Transient state ("currently editing X", "tests passing")
+- Trivially re-discoverable facts (line numbers, file sizes)
+- Vague platitudes ("user likes clean code")
+- Secrets, API keys, passwords — never
+- Things already in CLAUDE.md or AGENTS.md
 
-## Wings and Rooms
+## Progressive Trust Model
 
-Organize memories into wings (project namespaces) and rooms (topic areas):
-- wing: "project" for general project memories (default)
-- wing: "tests" for test-related memories
-- room: "architecture", "bugs", "decisions", "dependencies", "api", etc.
-
-## Progressive trust model
-
-- Early in a session: use fact_check on retrieved memories, validate against files.
-- Mid-session: trust verified memories, use contradiction_check on new facts.
-- After verification: use memories as primary source, validate only when uncertain.
-
-## Usage tips
-
-- Store immediately after making a significant discovery or decision — don't wait.
-- Use diary_write at the start and end of multi-step tasks for session continuity.
-- Use kg_add for persistent entity relationships (e.g., "AuthService depends_on DatabasePool").
-- Use contradiction_check BEFORE kg_add to avoid storing conflicting facts.
-- Use multi_hop to discover indirect dependencies and relationships you didn't know about.
-- Prefer specific wing/room filters when searching to improve result relevance.
-- You have the capability to call multiple tools in a single response. Speculatively search memory while also reading files.
+- Early session: build_context first, validate memories against files
+- Mid-session: trust verified memories, contradiction_check on new facts
+- Late session: use memories as primary source, validate only when uncertain

@@ -1,27 +1,21 @@
 #!/usr/bin/env python3
 """
-MemPalace bridge for OpenCode native tool integration.
+MemPalace bridge for OpenCode — unified MemPalace + Rekal engine.
 Protocol: newline-delimited JSON over stdin/stdout.
-Runs as a persistent subprocess — do not exit between requests.
 
-Place this file at: packages/opencode/src/tool/mempalace_bridge.py
+Place at: packages/opencode/src/tool/mempalace_bridge.py
 """
 import sys
 import os
 import json
 import traceback
 
-# ── Set palace path from environment BEFORE any mempalace imports ─────────
 data_dir = os.environ.get("MEMPALACE_DATA_DIR", "")
 if data_dir:
     os.makedirs(data_dir, exist_ok=True)
     os.environ["MEMPALACE_PALACE_PATH"] = data_dir
 
 # ── Stdout protection ────────────────────────────────────────────────────
-# Same pattern as mempalace/mcp_server.py (issue #225): redirect stdout →
-# stderr at both the fd and Python level before heavy imports, so chromadb /
-# onnxruntime banners don't corrupt our JSON protocol. We restore the real
-# stdout after imports are complete.
 _REAL_STDOUT = sys.stdout
 _REAL_STDOUT_FD = None
 try:
@@ -31,53 +25,49 @@ except (OSError, AttributeError):
     pass
 sys.stdout = sys.stderr
 
-# ── Import mempalace tool handlers ────────────────────────────────────────
+# ── Imports ──────────────────────────────────────────────────────────────
 _IMPORT_ERROR = None
+_mcp_mod = None
 _kg = None
 _config = None
+_search_memories = None
+
 try:
     from mempalace import mcp_server as _mcp_mod
-    from mempalace.searcher import search_memories
-
-    tool_status = _mcp_mod.tool_status
-    tool_list_wings = _mcp_mod.tool_list_wings
-    tool_list_rooms = _mcp_mod.tool_list_rooms
-    tool_search = _mcp_mod.tool_search
-    tool_add_drawer = _mcp_mod.tool_add_drawer
-    tool_kg_add = _mcp_mod.tool_kg_add
-    tool_kg_query = _mcp_mod.tool_kg_query
-    tool_kg_invalidate = _mcp_mod.tool_kg_invalidate
-    tool_diary_write = _mcp_mod.tool_diary_write
-    tool_diary_read = _mcp_mod.tool_diary_read
+    from mempalace.searcher import search_memories as _search_memories_fn
     _kg = _mcp_mod._kg
     _config = _mcp_mod._config
+    _search_memories = _search_memories_fn
 except ImportError as e:
     _IMPORT_ERROR = str(e)
 
-# ── Import advanced retriever (lives alongside this bridge script) ────────
-_RETRIEVER_ERROR = None
-try:
-    # The retriever module is in the same directory as this bridge script
-    import importlib.util
-    _bridge_dir = os.path.dirname(os.path.abspath(__file__))
-    _spec = importlib.util.spec_from_file_location(
-        "mempalace_retriever",
-        os.path.join(_bridge_dir, "mempalace_retriever.py"),
-    )
-    _retriever_mod = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_retriever_mod)
-    adaptive_search = _retriever_mod.adaptive_search
-    contradiction_check = _retriever_mod.contradiction_check
-    fact_check = _retriever_mod.fact_check
-    multi_hop_query = _retriever_mod.multi_hop_query
-except Exception as e:
-    _RETRIEVER_ERROR = str(e)
-    adaptive_search = None
-    contradiction_check = None
-    fact_check = None
-    multi_hop_query = None
+# ── Rekal engine ─────────────────────────────────────────────────────────
+_ENGINE = None
+_ENGINE_ERROR = None
 
-# ── Restore real stdout for JSON protocol output ─────────────────────────
+if _IMPORT_ERROR is None:
+    try:
+        import importlib.util
+        _bridge_dir = os.path.dirname(os.path.abspath(__file__))
+        _spec = importlib.util.spec_from_file_location(
+            "mempalace_rekal_engine",
+            os.path.join(_bridge_dir, "mempalace_rekal_engine.py"),
+        )
+        _engine_mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_engine_mod)
+        _RekalEngine = _engine_mod.RekalEngine
+
+        palace_path = _config.palace_path if _config else data_dir
+        _ENGINE = _RekalEngine(
+            data_dir=data_dir,
+            palace_path=palace_path,
+            kg=_kg,
+            search_memories_fn=_search_memories,
+        )
+    except Exception as e:
+        _ENGINE_ERROR = str(e)
+
+# ── Restore stdout ───────────────────────────────────────────────────────
 if _REAL_STDOUT_FD is not None:
     try:
         os.dup2(_REAL_STDOUT_FD, 1)
@@ -88,166 +78,207 @@ if _REAL_STDOUT_FD is not None:
 sys.stdout = _REAL_STDOUT
 
 
-# ── Operation handlers ───────────────────────────────────────────────────
-# Each handler receives the full request dict and returns a result dict.
-# Parameter names are translated from the LLM-facing schema (entity /
-# relation / target) to the mempalace API names (subject / predicate /
-# object) where necessary.
+# ══════════════════════════════════════════════════════════════════════════
+#  Handlers — MemPalace native tools (unchanged, use mcp_server directly)
+# ══════════════════════════════════════════════════════════════════════════
 
-def handle_search(params):
-    return tool_search(
-        query=params.get("query", ""),
-        limit=int(params.get("limit", 5)),
-        wing=params.get("wing") or None,
-        room=params.get("room") or None,
+def handle_search(p):
+    return _mcp_mod.tool_search(
+        query=p.get("query", ""), limit=int(p.get("limit", 5)),
+        wing=p.get("wing") or None, room=p.get("room") or None,
     )
 
-
-def handle_smart_search(params):
-    """Adaptive two-phase retrieval that scales to large palaces."""
-    if adaptive_search is None:
-        return {
-            "error": f"Advanced retriever not available: {_RETRIEVER_ERROR}",
-            "hint": "Falling back to standard search",
-        }
-    palace_path = _config.palace_path if _config else data_dir
-    vector_off = False
-    try:
-        vector_off = _mcp_mod._vector_disabled
-    except Exception:
-        pass
-    return adaptive_search(
-        query=params.get("query", ""),
-        palace_path=palace_path,
-        wing=params.get("wing") or None,
-        room=params.get("room") or None,
-        n_results=int(params.get("limit", 5)),
-        kg=_kg,
-        vector_disabled=vector_off,
-        expand_with_kg=params.get("expand_with_kg", True),
-    )
-
-
-def handle_contradiction_check(params):
-    """Find facts that contradict a given statement."""
-    if contradiction_check is None:
-        return {
-            "error": f"Advanced retriever not available: {_RETRIEVER_ERROR}",
-        }
-    palace_path = _config.palace_path if _config else data_dir
-    return contradiction_check(
-        statement=params.get("statement", params.get("content", "")),
-        entity=params.get("entity") or None,
-        kg=_kg,
-        palace_path=palace_path,
-        search_memories_fn=search_memories if "search_memories" in dir() else None,
-    )
-
-
-def handle_fact_check(params):
-    """Validate a claim against the knowledge graph and stored memories."""
-    if fact_check is None:
-        return {
-            "error": f"Advanced retriever not available: {_RETRIEVER_ERROR}",
-        }
-    palace_path = _config.palace_path if _config else data_dir
-    vector_off = False
-    try:
-        vector_off = _mcp_mod._vector_disabled
-    except Exception:
-        pass
-    return fact_check(
-        claim=params.get("claim", params.get("content", "")),
-        kg=_kg,
-        palace_path=palace_path,
-        search_memories_fn=search_memories if "search_memories" in dir() else None,
-        vector_disabled=vector_off,
-    )
-
-
-def handle_multi_hop(params):
-    """Multi-hop graph traversal between entities."""
-    if multi_hop_query is None:
-        return {
-            "error": f"Advanced retriever not available: {_RETRIEVER_ERROR}",
-        }
-    return multi_hop_query(
-        start_entity=params.get("entity", ""),
-        target_entity=params.get("target") or None,
-        max_hops=int(params.get("depth", 3)),
-        kg=_kg,
-    )
-
-
-def handle_store(params):
-    return tool_add_drawer(
-        wing=params.get("wing", "project"),
-        room=params.get("room", "general"),
-        content=params.get("content", ""),
-        source_file=params.get("drawer") or None,
+def handle_store(p):
+    return _mcp_mod.tool_add_drawer(
+        wing=p.get("wing", "project"), room=p.get("room", "general"),
+        content=p.get("content", ""), source_file=p.get("drawer") or None,
         added_by="opencode-agent",
     )
 
+def handle_status(p):
+    return _mcp_mod.tool_status()
 
-def handle_status(params):
-    return tool_status()
+def handle_list_wings(p):
+    return _mcp_mod.tool_list_wings()
 
+def handle_list_rooms(p):
+    return _mcp_mod.tool_list_rooms(wing=p.get("wing") or None)
 
-def handle_list_wings(params):
-    return tool_list_wings()
+def handle_kg_add(p):
+    return _mcp_mod.tool_kg_add(
+        subject=p.get("entity", ""), predicate=p.get("relation", ""),
+        object=p.get("target", ""), valid_from=p.get("valid_from"),
+    )
 
+def handle_kg_query(p):
+    return _mcp_mod.tool_kg_query(
+        entity=p.get("entity", ""), as_of=p.get("as_of"),
+        direction=p.get("direction", "both"),
+    )
 
-def handle_list_rooms(params):
-    return tool_list_rooms(wing=params.get("wing") or None)
+def handle_kg_invalidate(p):
+    return _mcp_mod.tool_kg_invalidate(
+        subject=p.get("entity", ""), predicate=p.get("relation", ""),
+        object=p.get("target", ""), ended=p.get("ended"),
+    )
 
+def handle_diary_write(p):
+    return _mcp_mod.tool_diary_write(
+        agent_name=p.get("agent_name", "opencode"), entry=p.get("entry", ""),
+        topic=p.get("topic", "general"), wing=p.get("wing", ""),
+    )
 
-def handle_kg_add(params):
-    return tool_kg_add(
-        subject=params.get("entity", ""),
-        predicate=params.get("relation", ""),
-        object=params.get("target", ""),
-        valid_from=params.get("valid_from"),
-        source_closet=params.get("source_closet"),
+def handle_diary_read(p):
+    return _mcp_mod.tool_diary_read(
+        agent_name=p.get("agent_name", "opencode"),
+        last_n=int(p.get("limit", 10)), wing=p.get("wing", ""),
     )
 
 
-def handle_kg_query(params):
-    return tool_kg_query(
-        entity=params.get("entity", ""),
-        as_of=params.get("as_of"),
-        direction=params.get("direction", "both"),
+# ══════════════════════════════════════════════════════════════════════════
+#  Handlers — Rekal engine operations
+# ══════════════════════════════════════════════════════════════════════════
+
+def _require_engine():
+    if _ENGINE is None:
+        return {"error": f"Rekal engine not available: {_ENGINE_ERROR or 'unknown'}"}
+    return None
+
+def handle_memory_store(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.store(
+        content=p.get("content", ""),
+        memory_type=p.get("memory_type", "fact"),
+        project=p.get("project"), wing=p.get("wing"),
+        room=p.get("room"), tags=p.get("tags"),
     )
 
-
-def handle_kg_invalidate(params):
-    return tool_kg_invalidate(
-        subject=params.get("entity", ""),
-        predicate=params.get("relation", ""),
-        object=params.get("target", ""),
-        ended=params.get("ended"),
+def handle_memory_search(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.search(
+        query=p.get("query", ""), limit=int(p.get("limit", 10)),
+        project=p.get("project"), memory_type=p.get("memory_type"),
+        wing=p.get("wing"), room=p.get("room"),
+        w_fts=p.get("w_fts"), w_vec=p.get("w_vec"),
+        w_recency=p.get("w_recency"), half_life=p.get("half_life"),
     )
 
-
-def handle_diary_write(params):
-    return tool_diary_write(
-        agent_name=params.get("agent_name", "opencode"),
-        entry=params.get("entry", ""),
-        topic=params.get("topic", "general"),
-        wing=params.get("wing", ""),
+def handle_memory_update(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.update(
+        memory_id=p.get("memory_id", ""),
+        content=p.get("content"), tags=p.get("tags"),
+        memory_type=p.get("memory_type"),
     )
 
-
-def handle_diary_read(params):
-    return tool_diary_read(
-        agent_name=params.get("agent_name", "opencode"),
-        last_n=int(params.get("limit", 10)),
-        wing=params.get("wing", ""),
+def handle_memory_supersede(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.supersede(
+        old_id=p.get("old_id", ""),
+        new_content=p.get("content", ""),
+        memory_type=p.get("memory_type"),
+        project=p.get("project"), wing=p.get("wing"),
+        room=p.get("room"), tags=p.get("tags"),
     )
 
+def handle_memory_delete(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.delete(memory_id=p.get("memory_id", ""))
+
+def handle_memory_link(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.link(
+        from_id=p.get("from_id", ""), to_id=p.get("to_id", ""),
+        relation=p.get("link_relation", "related_to"),
+    )
+
+def handle_build_context(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.build_context(
+        query=p.get("query", ""), project=p.get("project"),
+        limit=int(p.get("limit", 10)),
+        w_fts=p.get("w_fts"), w_vec=p.get("w_vec"),
+        w_recency=p.get("w_recency"), half_life=p.get("half_life"),
+    )
+
+def handle_memory_conflicts(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.get_conflicts(project=p.get("project"))
+
+def handle_memory_health(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.health()
+
+def handle_memory_similar(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.similar(memory_id=p.get("memory_id", ""), limit=int(p.get("limit", 5)))
+
+def handle_memory_topics(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.topics(project=p.get("project"))
+
+def handle_memory_timeline(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.timeline(
+        project=p.get("project"), start=p.get("start"),
+        end=p.get("end"), limit=int(p.get("limit", 20)),
+    )
+
+def handle_memory_related(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.related(memory_id=p.get("memory_id", ""))
+
+def handle_contradiction_check(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.contradiction_check(
+        statement=p.get("statement", p.get("content", "")),
+        entity=p.get("entity"),
+    )
+
+def handle_fact_check(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.fact_check(claim=p.get("claim", p.get("content", "")))
+
+def handle_multi_hop(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.multi_hop(
+        start_entity=p.get("entity", ""),
+        target_entity=p.get("target"),
+        max_hops=int(p.get("depth", 3)),
+    )
+
+def handle_set_config(p):
+    err = _require_engine()
+    if err: return err
+    project = p.get("project")
+    if not project:
+        return {"error": "project is required for set_config"}
+    return _ENGINE.set_config(project, p.get("key", ""), p.get("value", ""))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Handler registry
+# ══════════════════════════════════════════════════════════════════════════
 
 HANDLERS = {
+    # MemPalace native (drawer-level)
     "search": handle_search,
-    "smart_search": handle_smart_search,
     "store": handle_store,
     "status": handle_status,
     "list_wings": handle_list_wings,
@@ -255,61 +286,60 @@ HANDLERS = {
     "kg_add": handle_kg_add,
     "kg_query": handle_kg_query,
     "kg_invalidate": handle_kg_invalidate,
+    "diary_write": handle_diary_write,
+    "diary_read": handle_diary_read,
+    # Rekal engine (structured memory)
+    "memory_store": handle_memory_store,
+    "memory_search": handle_memory_search,
+    "memory_update": handle_memory_update,
+    "memory_supersede": handle_memory_supersede,
+    "memory_delete": handle_memory_delete,
+    "memory_link": handle_memory_link,
+    "build_context": handle_build_context,
+    "memory_conflicts": handle_memory_conflicts,
+    "memory_health": handle_memory_health,
+    "memory_similar": handle_memory_similar,
+    "memory_topics": handle_memory_topics,
+    "memory_timeline": handle_memory_timeline,
+    "memory_related": handle_memory_related,
     "contradiction_check": handle_contradiction_check,
     "fact_check": handle_fact_check,
     "multi_hop": handle_multi_hop,
-    "diary_write": handle_diary_write,
-    "diary_read": handle_diary_read,
+    "set_config": handle_set_config,
 }
 
 
-def _write_response(response):
-    """Write a JSON response to stdout, terminated by newline."""
+def _write(response):
     sys.stdout.write(json.dumps(response, default=str) + "\n")
     sys.stdout.flush()
 
 
 def main():
-    # If mempalace failed to import, signal the error and exit
     if _IMPORT_ERROR is not None:
-        _write_response({
-            "status": "error",
-            "message": f"mempalace import failed: {_IMPORT_ERROR}. "
-                       "Install with: pip install mempalace",
-        })
+        _write({"status": "error", "message": f"mempalace import failed: {_IMPORT_ERROR}. Install with: pip install mempalace"})
         sys.exit(1)
 
-    # Signal readiness (include retriever status)
-    ready_data = "ready"
-    if _RETRIEVER_ERROR:
-        ready_data = f"ready (advanced retriever unavailable: {_RETRIEVER_ERROR})"
-    _write_response({"status": "ok", "data": ready_data})
+    status = "ready"
+    if _ENGINE_ERROR:
+        status = f"ready (rekal engine unavailable: {_ENGINE_ERROR})"
+    _write({"status": "ok", "data": status})
 
-    # Main request loop — read one JSON object per line from stdin
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
             request = json.loads(line)
-            operation = request.get("operation")
-            handler = HANDLERS.get(operation)
+            op = request.get("operation")
+            handler = HANDLERS.get(op)
             if handler is None:
-                response = {
-                    "status": "error",
-                    "message": f"Unknown operation: {operation}. "
-                               f"Valid operations: {', '.join(sorted(HANDLERS.keys()))}",
-                }
+                response = {"status": "error", "message": f"Unknown operation: {op}. Valid: {', '.join(sorted(HANDLERS.keys()))}"}
             else:
                 result = handler(request)
                 response = {"status": "ok", "data": result}
         except Exception:
-            response = {
-                "status": "error",
-                "message": traceback.format_exc(),
-            }
-
-        _write_response(response)
+            response = {"status": "error", "message": traceback.format_exc()}
+        _write(response)
 
 
 if __name__ == "__main__":
