@@ -33,21 +33,49 @@ sys.stdout = sys.stderr
 
 # ── Import mempalace tool handlers ────────────────────────────────────────
 _IMPORT_ERROR = None
+_kg = None
+_config = None
 try:
-    from mempalace.mcp_server import (
-        tool_status,
-        tool_list_wings,
-        tool_list_rooms,
-        tool_search,
-        tool_add_drawer,
-        tool_kg_add,
-        tool_kg_query,
-        tool_kg_invalidate,
-        tool_diary_write,
-        tool_diary_read,
-    )
+    from mempalace import mcp_server as _mcp_mod
+    from mempalace.searcher import search_memories
+
+    tool_status = _mcp_mod.tool_status
+    tool_list_wings = _mcp_mod.tool_list_wings
+    tool_list_rooms = _mcp_mod.tool_list_rooms
+    tool_search = _mcp_mod.tool_search
+    tool_add_drawer = _mcp_mod.tool_add_drawer
+    tool_kg_add = _mcp_mod.tool_kg_add
+    tool_kg_query = _mcp_mod.tool_kg_query
+    tool_kg_invalidate = _mcp_mod.tool_kg_invalidate
+    tool_diary_write = _mcp_mod.tool_diary_write
+    tool_diary_read = _mcp_mod.tool_diary_read
+    _kg = _mcp_mod._kg
+    _config = _mcp_mod._config
 except ImportError as e:
     _IMPORT_ERROR = str(e)
+
+# ── Import advanced retriever (lives alongside this bridge script) ────────
+_RETRIEVER_ERROR = None
+try:
+    # The retriever module is in the same directory as this bridge script
+    import importlib.util
+    _bridge_dir = os.path.dirname(os.path.abspath(__file__))
+    _spec = importlib.util.spec_from_file_location(
+        "mempalace_retriever",
+        os.path.join(_bridge_dir, "mempalace_retriever.py"),
+    )
+    _retriever_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_retriever_mod)
+    adaptive_search = _retriever_mod.adaptive_search
+    contradiction_check = _retriever_mod.contradiction_check
+    fact_check = _retriever_mod.fact_check
+    multi_hop_query = _retriever_mod.multi_hop_query
+except Exception as e:
+    _RETRIEVER_ERROR = str(e)
+    adaptive_search = None
+    contradiction_check = None
+    fact_check = None
+    multi_hop_query = None
 
 # ── Restore real stdout for JSON protocol output ─────────────────────────
 if _REAL_STDOUT_FD is not None:
@@ -72,6 +100,82 @@ def handle_search(params):
         limit=int(params.get("limit", 5)),
         wing=params.get("wing") or None,
         room=params.get("room") or None,
+    )
+
+
+def handle_smart_search(params):
+    """Adaptive two-phase retrieval that scales to large palaces."""
+    if adaptive_search is None:
+        return {
+            "error": f"Advanced retriever not available: {_RETRIEVER_ERROR}",
+            "hint": "Falling back to standard search",
+        }
+    palace_path = _config.palace_path if _config else data_dir
+    vector_off = False
+    try:
+        vector_off = _mcp_mod._vector_disabled
+    except Exception:
+        pass
+    return adaptive_search(
+        query=params.get("query", ""),
+        palace_path=palace_path,
+        wing=params.get("wing") or None,
+        room=params.get("room") or None,
+        n_results=int(params.get("limit", 5)),
+        kg=_kg,
+        vector_disabled=vector_off,
+        expand_with_kg=params.get("expand_with_kg", True),
+    )
+
+
+def handle_contradiction_check(params):
+    """Find facts that contradict a given statement."""
+    if contradiction_check is None:
+        return {
+            "error": f"Advanced retriever not available: {_RETRIEVER_ERROR}",
+        }
+    palace_path = _config.palace_path if _config else data_dir
+    return contradiction_check(
+        statement=params.get("statement", params.get("content", "")),
+        entity=params.get("entity") or None,
+        kg=_kg,
+        palace_path=palace_path,
+        search_memories_fn=search_memories if "search_memories" in dir() else None,
+    )
+
+
+def handle_fact_check(params):
+    """Validate a claim against the knowledge graph and stored memories."""
+    if fact_check is None:
+        return {
+            "error": f"Advanced retriever not available: {_RETRIEVER_ERROR}",
+        }
+    palace_path = _config.palace_path if _config else data_dir
+    vector_off = False
+    try:
+        vector_off = _mcp_mod._vector_disabled
+    except Exception:
+        pass
+    return fact_check(
+        claim=params.get("claim", params.get("content", "")),
+        kg=_kg,
+        palace_path=palace_path,
+        search_memories_fn=search_memories if "search_memories" in dir() else None,
+        vector_disabled=vector_off,
+    )
+
+
+def handle_multi_hop(params):
+    """Multi-hop graph traversal between entities."""
+    if multi_hop_query is None:
+        return {
+            "error": f"Advanced retriever not available: {_RETRIEVER_ERROR}",
+        }
+    return multi_hop_query(
+        start_entity=params.get("entity", ""),
+        target_entity=params.get("target") or None,
+        max_hops=int(params.get("depth", 3)),
+        kg=_kg,
     )
 
 
@@ -143,6 +247,7 @@ def handle_diary_read(params):
 
 HANDLERS = {
     "search": handle_search,
+    "smart_search": handle_smart_search,
     "store": handle_store,
     "status": handle_status,
     "list_wings": handle_list_wings,
@@ -150,6 +255,9 @@ HANDLERS = {
     "kg_add": handle_kg_add,
     "kg_query": handle_kg_query,
     "kg_invalidate": handle_kg_invalidate,
+    "contradiction_check": handle_contradiction_check,
+    "fact_check": handle_fact_check,
+    "multi_hop": handle_multi_hop,
     "diary_write": handle_diary_write,
     "diary_read": handle_diary_read,
 }
@@ -171,8 +279,11 @@ def main():
         })
         sys.exit(1)
 
-    # Signal readiness
-    _write_response({"status": "ok", "data": "ready"})
+    # Signal readiness (include retriever status)
+    ready_data = "ready"
+    if _RETRIEVER_ERROR:
+        ready_data = f"ready (advanced retriever unavailable: {_RETRIEVER_ERROR})"
+    _write_response({"status": "ok", "data": ready_data})
 
     # Main request loop — read one JSON object per line from stdin
     for line in sys.stdin:

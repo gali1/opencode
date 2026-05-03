@@ -19,6 +19,7 @@ const BRIDGE_SCRIPT = path.join(MODULE_DIR, "mempalace_bridge.py")
 export const Parameters = Schema.Struct({
   operation: Schema.Literals([
     "search",
+    "smart_search",
     "store",
     "status",
     "list_wings",
@@ -26,6 +27,9 @@ export const Parameters = Schema.Struct({
     "kg_add",
     "kg_query",
     "kg_invalidate",
+    "contradiction_check",
+    "fact_check",
+    "multi_hop",
     "diary_write",
     "diary_read",
   ]),
@@ -57,6 +61,12 @@ export const Parameters = Schema.Struct({
   depth: Schema.optional(Schema.Number),
 
   agent_name: Schema.optional(Schema.String),
+
+  statement: Schema.optional(Schema.String),
+
+  claim: Schema.optional(Schema.String),
+
+  expand_with_kg: Schema.optional(Schema.Boolean),
 })
 
 // ─── Subprocess manager (module-level singleton per process) ─────────────
@@ -210,13 +220,21 @@ function ipcCall(request: Record<string, unknown>): Promise<unknown> {
 }
 
 // ─── Format search results for LLM consumption ──────────────────────────
-function formatSearchResults(data: unknown): string {
+function formatSearchResults(data: unknown, adaptive = false): string {
   const envelope = data as Record<string, unknown>
   const results = (envelope?.results ?? []) as Array<Record<string, unknown>>
 
   if (!results.length) return "No memories found matching your query."
 
-  return results
+  const header_parts: string[] = []
+  if (adaptive) {
+    if (envelope?.total_drawers) header_parts.push(`Palace: ${envelope.total_drawers} drawers`)
+    if (envelope?.adaptive_k) header_parts.push(`Candidates scanned: ${envelope.adaptive_k}`)
+    if (envelope?.kg_expanded) header_parts.push(`Query expanded via KG`)
+  }
+  const header = header_parts.length > 0 ? header_parts.join(" | ") + "\n\n" : ""
+
+  const formatted = results
     .map((r, i) => {
       const similarity = typeof r.similarity === "number" ? r.similarity.toFixed(3) : "?"
       const bm25 = typeof r.bm25_score === "number" ? r.bm25_score.toFixed(2) : ""
@@ -227,16 +245,24 @@ function formatSearchResults(data: unknown): string {
       const text = r.text ?? ""
       const via = r.matched_via ?? "drawer"
 
-      let header = `[${i + 1}] sim=${similarity}`
-      if (bm25) header += ` bm25=${bm25}`
-      header += ` | ${wing}/${room}`
-      if (source && source !== "?") header += ` | ${source}`
-      if (created && created !== "unknown") header += ` | ${created}`
-      header += ` (${via})`
+      let line = `[${i + 1}] sim=${similarity}`
+      if (bm25) line += ` bm25=${bm25}`
+      if (adaptive && typeof r.adaptive_score === "number") {
+        line += ` adaptive=${r.adaptive_score.toFixed(3)}`
+      }
+      if (adaptive && typeof r.recency_score === "number") {
+        line += ` recency=${r.recency_score.toFixed(2)}`
+      }
+      line += ` | ${wing}/${room}`
+      if (source && source !== "?") line += ` | ${source}`
+      if (created && created !== "unknown") line += ` | ${created}`
+      line += ` (${via})`
 
-      return `${header}\n    ${String(text).substring(0, 2000)}`
+      return `${line}\n    ${String(text).substring(0, 2000)}`
     })
     .join("\n\n")
+
+  return header + formatted
 }
 
 // ─── Tool definition ─────────────────────────────────────────────────────
@@ -309,6 +335,13 @@ export const MempalaceTool = Tool.define(
               const results = (envelope?.results ?? []) as unknown[]
               title = `Memory Search (${results.length} results)`
               output = formatSearchResults(raw)
+              break
+            }
+            case "smart_search": {
+              const envelope = raw as Record<string, unknown>
+              const results = (envelope?.results ?? []) as unknown[]
+              title = `Adaptive Search (${results.length} results)`
+              output = formatSearchResults(raw, true)
               break
             }
             case "store": {
@@ -414,6 +447,87 @@ export const MempalaceTool = Tool.define(
               } else {
                 output = `Invalidated: ${result?.fact ?? `${params.entity} → ${params.relation} → ${params.target}`}`
               }
+              break
+            }
+            case "contradiction_check": {
+              const result = raw as Record<string, unknown>
+              const contradictions = (result?.contradictions ?? []) as Array<Record<string, unknown>>
+              const verdict = result?.verdict ?? "unknown"
+              title = `Contradiction Check — ${verdict} (${contradictions.length} found)`
+              const lines: string[] = []
+              lines.push(`Statement: ${result?.statement ?? params.statement ?? "?"}`)
+              lines.push(`Verdict: ${verdict}`)
+              lines.push(`Entities checked: ${((result?.entities_checked ?? []) as string[]).join(", ") || "none"}`)
+              if (contradictions.length > 0) {
+                lines.push("")
+                lines.push("Contradictions:")
+                for (const c of contradictions) {
+                  lines.push(`  [${c.type}] confidence=${c.confidence} — ${c.reason}`)
+                  lines.push(`    Fact: ${c.fact}`)
+                }
+              }
+              output = lines.join("\n")
+              break
+            }
+            case "fact_check": {
+              const result = raw as Record<string, unknown>
+              const verdict = result?.verdict ?? "unknown"
+              const confidence = result?.confidence ?? 0
+              const supporting = (result?.supporting_evidence ?? []) as Array<Record<string, unknown>>
+              const contradicting = (result?.contradicting_evidence ?? []) as Array<Record<string, unknown>>
+              title = `Fact Check — ${verdict} (confidence: ${confidence})`
+              const lines: string[] = []
+              lines.push(`Claim: ${result?.claim ?? params.claim ?? "?"}`)
+              lines.push(`Verdict: ${verdict}`)
+              lines.push(`Confidence: ${confidence}`)
+              lines.push(`Entities: ${((result?.entities ?? []) as string[]).join(", ") || "none"}`)
+              if (supporting.length > 0) {
+                lines.push("")
+                lines.push("Supporting evidence:")
+                for (const s of supporting) {
+                  if (s.fact) lines.push(`  [${s.type}] ${s.fact}`)
+                  else if (s.text) lines.push(`  [${s.type}] sim=${s.similarity} — ${s.text}`)
+                }
+              }
+              if (contradicting.length > 0) {
+                lines.push("")
+                lines.push("Contradicting evidence:")
+                for (const c of contradicting) {
+                  lines.push(`  [${c.type}] confidence=${c.confidence} — ${c.reason}`)
+                }
+              }
+              output = lines.join("\n")
+              break
+            }
+            case "multi_hop": {
+              const result = raw as Record<string, unknown>
+              const paths = (result?.paths ?? []) as Array<Record<string, unknown>>
+              const reachable = result?.reachable_entities ?? 0
+              title = `Multi-Hop — ${params.entity}${params.target ? ` → ${params.target}` : ""} (${paths.length} paths, ${reachable} reachable)`
+              const lines: string[] = []
+              lines.push(`Start: ${result?.start ?? params.entity}`)
+              if (result?.target) lines.push(`Target: ${result.target}`)
+              lines.push(`Max hops: ${result?.max_hops ?? params.depth ?? 3}`)
+              lines.push(`Nodes explored: ${result?.graph_explored ?? "?"}`)
+              if (paths.length > 0) {
+                lines.push("")
+                lines.push("Paths found:")
+                for (const p of paths) {
+                  const pathArr = (p.path ?? []) as string[]
+                  lines.push(`  [${p.hops} hops] ${pathArr.join(" ")}`)
+                }
+              } else {
+                lines.push("")
+                if (result?.target) {
+                  lines.push(`No path found from ${result?.start} to ${result.target} within ${result?.max_hops} hops.`)
+                }
+              }
+              const reachableList = (result?.reachable ?? []) as string[]
+              if (reachableList.length > 0) {
+                lines.push("")
+                lines.push(`Reachable entities (${reachableList.length}): ${reachableList.join(", ")}`)
+              }
+              output = lines.join("\n")
               break
             }
             case "diary_write": {
