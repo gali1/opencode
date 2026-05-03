@@ -1,0 +1,79 @@
+Search, store, and retrieve persistent AI memory using MemPalace — a local, semantic memory system that persists across sessions.
+
+## When to use this tool
+
+Use this tool proactively to:
+- Recall prior decisions, architecture choices, or discoveries made in previous sessions
+- Store significant findings, code patterns, or reasoning conclusions immediately after reaching them
+- Track entity relationships (e.g., "ServiceA depends_on ServiceB") in the knowledge graph
+- Log structured diary entries at the start and end of major tasks
+- Verify facts before stating them confidently
+- Check for contradictions before adding new knowledge
+
+## Operations
+
+### Retrieval
+- search: Standard semantic search over stored memories. Good for small palaces.
+- smart_search: Adaptive two-phase retrieval that scales to large palaces (thousands of memories). Automatically adjusts candidate pool size, expands queries using knowledge graph entities, applies recency weighting, and deduplicates results. PREFER this over search when the palace has more than a few hundred memories.
+
+### Storage
+- store: Save verbatim content. Store code snippets, decisions, file summaries, error patterns.
+
+### Palace info
+- status: Check palace health, total memory count, and storage statistics.
+- list_wings: See all project namespaces.
+- list_rooms: See all topic areas within a wing.
+
+### Knowledge graph
+- kg_add: Assert an entity relationship with optional confidence score.
+- kg_query: Query all known relations for an entity.
+- kg_invalidate: Remove an incorrect or outdated knowledge graph assertion.
+
+### Verification (critical for accuracy)
+- contradiction_check: Before storing a new fact or making a claim, check if it contradicts existing knowledge. Provide the statement to check via the 'statement' parameter. Optionally scope to a specific entity. Returns a verdict: no_contradictions, possible_contradictions, or strong_contradictions.
+- fact_check: Validate a claim against both the knowledge graph and stored memories. Provide the claim via the 'claim' parameter. Returns a confidence score (0.0–1.0) and verdict: supported, partially_supported, unverified, or contradicted. Use this before relying on a memory you're uncertain about.
+
+### Graph traversal
+- multi_hop: Find indirect relationships between entities through the knowledge graph. Provide start entity via 'entity' and optional target via 'target'. Uses BFS up to 'depth' hops (default 3, max 6). Without a target, returns all reachable entities. With a target, returns all paths between them.
+
+### Session diary
+- diary_write: Log a timestamped entry for session continuity.
+- diary_read: Read recent diary entries to understand prior session state.
+
+## Validation requirement (critical)
+
+NEVER blindly trust retrieved memory. Always:
+1. Use fact_check on claims you're uncertain about before stating them.
+2. Use contradiction_check before storing new facts to catch conflicts.
+3. Cross-reference memory against current file state when memory age is unknown.
+4. If a memory contradicts current code, trust the code — the memory may be stale.
+
+## Retrieval strategy
+
+- For small palaces (<500 memories): use search — it's fast enough.
+- For medium/large palaces (500+): use smart_search — it adapts candidate pool size, applies recency weighting, and deduplicates automatically.
+- When searching for entity-related context: smart_search expands your query using knowledge graph relationships, improving recall on entity-centric queries.
+- Always prefer smart_search when you don't know how large the palace is.
+
+## Wings and Rooms
+
+Organize memories into wings (project namespaces) and rooms (topic areas):
+- wing: "project" for general project memories (default)
+- wing: "tests" for test-related memories
+- room: "architecture", "bugs", "decisions", "dependencies", "api", etc.
+
+## Progressive trust model
+
+- Early in a session: use fact_check on retrieved memories, validate against files.
+- Mid-session: trust verified memories, use contradiction_check on new facts.
+- After verification: use memories as primary source, validate only when uncertain.
+
+## Usage tips
+
+- Store immediately after making a significant discovery or decision — don't wait.
+- Use diary_write at the start and end of multi-step tasks for session continuity.
+- Use kg_add for persistent entity relationships (e.g., "AuthService depends_on DatabasePool").
+- Use contradiction_check BEFORE kg_add to avoid storing conflicting facts.
+- Use multi_hop to discover indirect dependencies and relationships you didn't know about.
+- Prefer specific wing/room filters when searching to improve result relevance.
+- You have the capability to call multiple tools in a single response. Speculatively search memory while also reading files.
