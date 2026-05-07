@@ -1,110 +1,114 @@
-Persistent AI memory system combining MemPalace (structured verbatim storage, knowledge graph) with Rekal (typed memories, lifecycle management, hybrid search with configurable weights).
+Persistent AI memory system. You have two memory layers: the conversation prompt (short-term) and mempalace (long-term). Use them together to minimize token usage while maintaining full recall.
 
-## Session Start — Do This First
+## HYBRID MEMORY PROTOCOL — Follow This Every Session
 
-Call build_context with your current task before exploring the codebase. This loads relevant memories, conflicts, and timeline in one call.
+### Phase 1: Session Bootstrap (MANDATORY — do first)
+Call session_init with your current task. This returns prior memories, recent diary entries, conflicts, and timeline in one call. Read the result before doing anything else.
 
-## Two Memory Layers
+If session_init is unavailable, call build_context instead.
 
-### Layer 1: MemPalace (drawers — verbatim storage)
+### Phase 2: Active Work (during the session)
+While working, follow these rules:
+
+SHORT-TERM (stays in prompt):
+- Current user message and your response
+- Active file contents being edited
+- Tool outputs from the current task
+- Errors being debugged right now
+
+LONG-TERM (goes to mempalace immediately):
+- User states a preference → memory_store(memory_type="preference")
+- Architecture or convention discovered → memory_store(memory_type="fact")
+- Decision made with reasoning → memory_store(memory_type="fact")
+- Bug with non-obvious cause → memory_store(memory_type="episode")
+- Procedure or workflow described → memory_store(memory_type="procedure")
+- Task completed or milestone reached → diary_write
+
+### Phase 3: Missing Context Detection
+When you realize you're missing context:
+1. Check: is it in the current prompt? → Use it directly
+2. Not in prompt? → Call memory_search or build_context to retrieve from mempalace
+3. Still not found? → Ask the user or use file tools
+
+NEVER guess when mempalace might have the answer. Query it.
+
+### Phase 4: Conversation Offloading
+When conversation grows long (many turns), call ingest_turns to compress and store older conversation content. This preserves the knowledge without keeping it in the prompt.
+
+Call ingest_turns when:
+- Conversation exceeds ~15 turns
+- Switching to a different task within the same session
+- Before a complex multi-step operation that needs prompt space
+- User says "let's move on" or changes topic
+
+### Phase 5: Session End
+Before the session ends:
+1. Call ingest_turns for any un-stored conversation content
+2. Call diary_write summarizing what was accomplished
+3. Store any final decisions or discoveries via memory_store
+
+## Operations
+
+### Session lifecycle
+- session_init: Bootstrap a session. Returns relevant memories + diary + conflicts + timeline. CALL THIS FIRST.
+- build_context: Load relevant memories for a query. Use mid-session when switching tasks.
+- ingest_turns: Compress and store conversation turns into structured memories. Call periodically to offload prompt.
+- diary_write / diary_read: Session journal for continuity.
+
+### MemPalace native (verbatim drawers)
 - search: Semantic search over stored drawers
 - store: File verbatim content into a wing/room
 - status, list_wings, list_rooms: Palace overview
 - kg_add, kg_query, kg_invalidate: Knowledge graph entity relationships
-- diary_write, diary_read: Session diary
 
-### Layer 2: Rekal Engine (structured memories with lifecycle)
-- memory_store: Store a typed, tagged, project-scoped memory
+### Rekal engine (structured memories with lifecycle)
+- memory_store: Store a typed, tagged memory
 - memory_search: Hybrid search (BM25 + vector + recency) with configurable weights
-- memory_update: Edit content, tags, or type of an existing memory
-- memory_delete: Remove a memory by ID
-- memory_supersede: Replace a memory while preserving history via links. ALWAYS prefer this over delete + store.
+- memory_update: Edit an existing memory
+- memory_supersede: Replace a memory while preserving history. ALWAYS prefer over delete+store.
+- memory_delete: Remove a memory
 - memory_link: Connect memories (supersedes, contradicts, related_to)
-- build_context: One call that returns relevant memories + conflicts + timeline. USE THIS AT SESSION START.
-- memory_conflicts: Find contradicting memory pairs
-- memory_health: Database stats (counts by type, project, active vs superseded)
-- memory_similar: Find memories similar to a given one
-- memory_topics: Topic summary grouped by type
-- memory_timeline: Chronological view with optional date range
-- memory_related: All links to and from a memory
-- set_config: Set per-project scoring weights (w_fts, w_vec, w_recency, half_life)
+- memory_conflicts: Find contradicting pairs
+- memory_health: Database statistics
+- memory_similar, memory_topics, memory_timeline, memory_related: Introspection
+- set_config: Per-project scoring weights
 
 ### Verification
-- contradiction_check: Check if a statement contradicts existing KG facts. Use BEFORE kg_add.
-- fact_check: Validate a claim against KG + stored memories. Returns confidence and verdict.
-- multi_hop: Find indirect entity relationships via BFS through the knowledge graph.
+- contradiction_check: Check before storing new facts
+- fact_check: Validate a claim against KG + memory
+- multi_hop: Find indirect entity relationships
 
-## When to Use Which Layer
-
-Use **Rekal engine** (memory_store, memory_search, memory_supersede) for:
-- User preferences and decisions
-- Architecture and conventions discovered during work
-- Procedures and workflows
-- Any knowledge that should survive across sessions
-
-Use **MemPalace native** (store, search) for:
-- Verbatim conversation content
-- Raw file summaries and code snippets
-- Content that benefits from MemPalace's wing/room hierarchy
-
-Use **build_context** at session start — it searches the Rekal engine and returns everything in one call.
-
-## Storing Memories — Critical Rules
+## Storing Rules
 
 ### ALWAYS search before storing
-```
 1. memory_search(query="<topic>", limit=5)
-2. Read results:
-   - Exact duplicate → do nothing
-   - Same topic, outdated → memory_supersede(old_id="<id>", content="<new>")
-   - Same topic, contradicts → memory_supersede(old_id="<id>", content="<corrected>")
-   - No match → memory_store(content="<fact>", memory_type="<type>", tags=[...])
-```
-Two memories about the same topic must NEVER coexist. Supersede, don't duplicate.
+2. Duplicate exists → skip
+3. Same topic, outdated → memory_supersede(old_id, content)
+4. No match → memory_store(content, memory_type, tags)
 
 ### Distill before storing
-NEVER store raw dialogue. Extract the durable fact, compress it.
-- Drop: articles, filler, hedging, pleasantries
-- Keep: technical terms, proper nouns, versions, reasons, causality
-- One memory = one distilled fact, 1-2 sentences max
+NEVER store raw dialogue. Extract the durable fact, compress.
+Drop: articles, filler, hedging. Keep: technical terms, proper nouns, reasons.
+One memory = one fact, 1-2 sentences.
 
-### memory_type values
-- fact: Objective truth about code/systems/APIs
-- preference: How user wants things done
-- procedure: Step-by-step workflow
-- context: Current project state (decays via recency scoring)
-- episode: Notable event, debugging session
+### memory_type: fact | preference | procedure | context | episode
+### tags: 2-4 specific tags, never generic
 
-### tags: 2-4 specific tags, never generic ("code", "project")
+## Token Optimization Strategy
 
-## Hybrid Search Scoring
+As conversation grows:
+1. Early turns (1-10): Everything fits in prompt. Store decisions/preferences to mempalace as they occur.
+2. Mid conversation (10-20): Call ingest_turns on turns 1-10. Prompt keeps only recent turns + session_init context.
+3. Long conversation (20+): Call ingest_turns again. Rely heavily on memory_search for historical context. Prompt holds only current task + last few turns.
 
-memory_search combines three signals:
-- BM25 keyword relevance (w_fts, default 0.4)
-- Vector semantic similarity (w_vec, default 0.4)
-- Recency decay (w_recency, default 0.2, half_life 30 days)
-
-Override per-search: memory_search(query="...", w_fts=0.8, w_vec=0.1, w_recency=0.1)
-Override per-project: set_config(project="myproj", key="w_fts", value="0.6")
-
-## Validation (critical)
-
-NEVER blindly trust retrieved memory. Always:
-1. Use fact_check on claims you're uncertain about
-2. Use contradiction_check BEFORE kg_add or memory_store
-3. Cross-reference against current file state when memory age is unknown
-4. If memory contradicts current code, trust the code
+The goal: a 100-turn conversation should use roughly the same prompt tokens as a 10-turn conversation, because the first 90 turns are in mempalace and retrievable on demand.
 
 ## What NOT to Store
-
-- Transient state ("currently editing X", "tests passing")
-- Trivially re-discoverable facts (line numbers, file sizes)
+- Transient state ("currently editing X")
+- Trivially re-discoverable facts (line numbers)
 - Vague platitudes ("user likes clean code")
 - Secrets, API keys, passwords — never
-- Things already in CLAUDE.md or AGENTS.md
+- Content already in the current prompt (wasteful duplication)
 
-## Progressive Trust Model
-
-- Early session: build_context first, validate memories against files
-- Mid-session: trust verified memories, contradiction_check on new facts
-- Late session: use memories as primary source, validate only when uncertain
+## Validation
+NEVER blindly trust retrieved memory. Cross-reference against current file state when uncertain. If memory contradicts current code, trust the code.

@@ -140,17 +140,33 @@ rm -f "$HOME/.opencode/bin/opencode" "$HOME/bin/opencode" "$HOME/.local/bin/open
 ```bash
 # From the repo root — link the CLI so `opencode` resolves to your local source
 cd packages/opencode
+bun install
 bun link
 ```
 
 If `bun link` does not place the binary on your `$PATH`, create a wrapper manually:
 
 ```bash
-# Adjust the path to wherever your clone lives
+# Find and remove the npm-linked binary
+which opencode
+# Then delete whatever path it shows, e.g.:
+sudo rm "$(which opencode)"
+
+# If npm put it in the global node_modules:
+sudo rm -f /usr/local/bin/opencode
+sudo rm -rf /usr/local/lib/node_modules/opencode
+
+# Also check bun's link directory
+rm -f ~/.bun/bin/opencode
+
+# Now recreate the wrapper fresh
 echo '#!/bin/sh
-exec bun run /home/$USER/opencode/packages/opencode/src/index.ts "$@"' \
+exec bun run --cwd ~/opencode/packages/opencode --conditions=browser ~/opencode/packages/opencode/src/index.ts "$@"' \
   | sudo tee /usr/local/bin/opencode > /dev/null
 sudo chmod +x /usr/local/bin/opencode
+
+# Refresh shell's command cache
+hash -r
 ```
 
 #### Verify

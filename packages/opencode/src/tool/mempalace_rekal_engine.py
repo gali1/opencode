@@ -1383,3 +1383,138 @@ class RekalEngine:
             "contradicting_evidence": contradicting[:5],
             "entities": entities[:10],
         }
+
+# ── Session Init ──────────────────────────────────────────────────
+
+    def session_init(self, task, project=None, limit=10, w_fts=None,
+                     w_vec=None, w_recency=None, half_life=None):
+        """One-call session bootstrap: memories + diary + conflicts + timeline."""
+        context = self.build_context(
+            query=task, project=project, limit=limit,
+            w_fts=w_fts, w_vec=w_vec, w_recency=w_recency, half_life=half_life,
+        )
+
+        # Recent diary entries
+        diary = []
+        try:
+            from mempalace import mcp_server as mcp
+            diary_result = mcp.tool_diary_read(agent_name="opencode", last_n=5)
+            diary = diary_result.get("entries", [])
+        except Exception:
+            pass
+
+        # Recent timeline (last 10 memories regardless of query relevance)
+        recent = self.timeline(project=project, limit=10)
+
+        # Health summary
+        health = self.health()
+
+        return {
+            "task": task,
+            "memories": context.get("memories", []),
+            "conflicts": context.get("conflicts", []),
+            "timeline_summary": context.get("timeline_summary", ""),
+            "weights": context.get("weights", {}),
+            "diary_entries": diary,
+            "recent_memories": recent,
+            "health": {
+                "total": health.get("total_memories", 0),
+                "active": health.get("active_memories", 0),
+                "conflicts": health.get("total_conflicts", 0),
+            },
+        }
+
+    # ── Ingest Turns ──────────────────────────────────────────────────
+
+    def ingest_turns(self, turns, project=None, wing=None, room=None):
+        """Compress and store conversation turns as structured memories.
+
+        Each turn is analyzed for durable knowledge. Transient content
+        (greetings, acknowledgments, tool invocations) is skipped.
+        Discoveries, decisions, and preferences are stored as memories.
+
+        Args:
+            turns: list of dicts with 'role' and 'content' keys,
+                   or a single string of conversation text.
+            project: optional project scope
+            wing: defaults to 'project'
+            room: defaults to 'conversations'
+
+        Returns summary of what was ingested.
+        """
+        if isinstance(turns, str):
+            turns = [{"role": "mixed", "content": turns}]
+
+        wing = wing or "project"
+        room = room or "conversations"
+        stored = 0
+        skipped = 0
+
+        # Transient content markers — skip turns that are purely mechanical
+        skip_markers = [
+            "certainly", "sure thing", "of course", "let me ",
+            "i'll ", "here's what", "tool call", "tool output",
+        ]
+
+        for turn in turns:
+            content = turn.get("content", "")
+            if not content or len(content.strip()) < 20:
+                skipped += 1
+                continue
+
+            # Skip purely transient turns
+            content_lower = content.lower()[:100]
+            if any(m in content_lower for m in skip_markers):
+                # But still store if the turn is long (likely has substance)
+                if len(content) < 200:
+                    skipped += 1
+                    continue
+
+            # Check for duplicates before storing
+            search_result = self.search(
+                query=content[:200], limit=3, wing=wing, room=room,
+            )
+            existing = search_result.get("results", [])
+            is_duplicate = any(
+                r.get("score", 0) > 0.85 for r in existing
+            )
+            if is_duplicate:
+                skipped += 1
+                continue
+
+            # Determine memory type from content
+            mem_type = "fact"
+            if turn.get("role") == "user":
+                # User messages often contain preferences or instructions
+                if any(w in content_lower for w in ["prefer", "always", "never", "don't", "use "]):
+                    mem_type = "preference"
+                elif any(w in content_lower for w in ["step", "first", "then", "process"]):
+                    mem_type = "procedure"
+            elif any(w in content_lower for w in ["decided", "chose", "conclusion", "found that"]):
+                mem_type = "fact"
+            elif any(w in content_lower for w in ["error", "bug", "fix", "issue", "crash"]):
+                mem_type = "episode"
+
+            # Truncate very long turns to essential content
+            store_content = content[:2000]
+            if len(content) > 2000:
+                store_content += "\n[...truncated from {} chars]".format(len(content))
+
+            self.store(
+                content=store_content,
+                memory_type=mem_type,
+                project=project,
+                wing=wing,
+                room=room,
+                tags=["auto-ingested", turn.get("role", "unknown")],
+            )
+            stored += 1
+
+        return {
+            "success": True,
+            "stored": stored,
+            "skipped": skipped,
+            "total_turns": len(turns),
+            "wing": wing,
+            "room": room,
+        }

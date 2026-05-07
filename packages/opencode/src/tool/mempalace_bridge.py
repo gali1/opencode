@@ -139,6 +139,27 @@ def handle_diary_read(p):
 #  Handlers — Rekal engine operations
 # ══════════════════════════════════════════════════════════════════════════
 
+def handle_session_init(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.session_init(
+        task=p.get("query", p.get("task", "")),
+        project=p.get("project"),
+        limit=int(p.get("limit", 10)),
+        w_fts=p.get("w_fts"), w_vec=p.get("w_vec"),
+        w_recency=p.get("w_recency"), half_life=p.get("half_life"),
+    )
+
+def handle_ingest_turns(p):
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.ingest_turns(
+        turns=p.get("turns", p.get("content", "")),
+        project=p.get("project"),
+        wing=p.get("wing"),
+        room=p.get("room"),
+    )
+
 def _require_engine():
     if _ENGINE is None:
         return {"error": f"Rekal engine not available: {_ENGINE_ERROR or 'unknown'}"}
@@ -306,6 +327,8 @@ HANDLERS = {
     "fact_check": handle_fact_check,
     "multi_hop": handle_multi_hop,
     "set_config": handle_set_config,
+    "session_init": handle_session_init,
+    "ingest_turns": handle_ingest_turns,
 }
 
 

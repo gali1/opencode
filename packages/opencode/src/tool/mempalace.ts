@@ -10,7 +10,6 @@ import DESCRIPTION from "./mempalace.txt"
 const MODULE_DIR: string = (import.meta as any).dir ?? path.dirname(new URL(import.meta.url).pathname)
 const BRIDGE_SCRIPT = path.join(MODULE_DIR, "mempalace_bridge.py")
 
-// ─── Parameter schema ────────────────────────────────────────────────────
 export const Parameters = Schema.Struct({
   operation: Schema.Literals([
     // MemPalace native
@@ -42,6 +41,8 @@ export const Parameters = Schema.Struct({
     "fact_check",
     "multi_hop",
     "set_config",
+    "session_init",
+    "ingest_turns",
   ]).annotate({
     description: "The operation to perform. This field is REQUIRED for every mempalace call.",
   }),
@@ -67,7 +68,6 @@ export const Parameters = Schema.Struct({
   entry: Schema.optional(Schema.String).annotate({ description: "Diary entry content for diary_write" }),
   depth: Schema.optional(Schema.Number).annotate({ description: "Search depth for multi_hop" }),
   agent_name: Schema.optional(Schema.String).annotate({ description: "Agent identifier for diary_write, diary_read" }),
-  // Rekal-specific
   memory_type: Schema.optional(Schema.String).annotate({
     description: "Type for memory_store: fact, preference, procedure, context, episode",
   }),
@@ -98,7 +98,12 @@ export const Parameters = Schema.Struct({
   start: Schema.optional(Schema.String).annotate({ description: "Start date for memory_timeline" }),
   end: Schema.optional(Schema.String).annotate({ description: "End date for memory_timeline" }),
   key: Schema.optional(Schema.String).annotate({ description: "Config key name for set_config" }),
-  value: Schema.optional(Schema.String).annotate({ description: "Config value for set_config" }),
+  value: Schema.optional(Schema.String).annotate({ description: "Config value or arbitrary string data" }),
+  turns: Schema.optional(Schema.Array(Schema.Struct({
+    role: Schema.optional(Schema.String),
+    content: Schema.optional(Schema.String),
+  }))).annotate({ description: "Conversation turns for ingest_turns or context building" }),
+  task: Schema.optional(Schema.String).annotate({ description: "Task name or identifier for specific operations" }),
 })
 
 // ─── Subprocess manager ──────────────────────────────────────────────────
@@ -563,15 +568,36 @@ export const MempalaceTool = Tool.define(
             }
             case "set_config": {
               title = "Config Set"
-              output =
-                data?.success === false
-                  ? `Failed: ${data?.error}`
-                  : `Set ${data?.key}=${data?.value} for project '${data?.project}'`
+              output = data?.success === false ? `Failed: ${data?.error}` : `Set ${data?.key}=${data?.value} for project '${data?.project}'`
               break
             }
-            default: {
-              output = JSON.stringify(raw, null, 2)
+            case "session_init": {
+              const memories = (data?.memories ?? []) as unknown[]
+              const conflicts = (data?.conflicts ?? []) as any[]
+              const diary = (data?.diary_entries ?? []) as any[]
+              const recent = (data?.recent_memories ?? []) as unknown[]
+              const health = data?.health as Record<string, number> | undefined
+              title = `Session Init (${memories.length} memories, ${conflicts.length} conflicts)`
+              const parts: string[] = []
+              if (health) parts.push(`Palace: ${health.total ?? 0} total, ${health.active ?? 0} active, ${health.conflicts ?? 0} conflicts`)
+              parts.push(data?.timeline_summary as string ?? "")
+              if (diary.length) {
+                parts.push("")
+                parts.push("Recent diary:")
+                for (const d of diary.slice(0, 3)) parts.push(`  [${d.timestamp ?? d.date}] ${(d.content ?? "").substring(0, 200)}`)
+              }
+              if (memories.length) { parts.push(""); parts.push("Relevant memories:"); parts.push(fmtMemoryList(memories)) }
+              if (conflicts.length) { parts.push(""); parts.push("Active conflicts:"); parts.push(fmtConflicts(conflicts)) }
+              if (recent.length) { parts.push(""); parts.push("Recent activity:"); parts.push(fmtMemoryList(recent.slice(0, 5))) }
+              output = parts.join("\n")
+              break
             }
+            case "ingest_turns": {
+              title = `Turns Ingested (${data?.stored ?? 0} stored, ${data?.skipped ?? 0} skipped)`
+              output = `Processed ${data?.total_turns ?? 0} turns.\n  Stored: ${data?.stored ?? 0}\n  Skipped: ${data?.skipped ?? 0} (transient or duplicate)\n  Location: ${data?.wing ?? "?"}/${data?.room ?? "?"}`
+              break
+            }
+            default: { output = JSON.stringify(raw, null, 2) }
           }
 
           return { title, metadata: { operation: params.operation, error: false, raw }, output }
