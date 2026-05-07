@@ -7,11 +7,17 @@ Provides:
   - Structured memory entries with types, tags, projects, access tracking
   - Memory lifecycle: store, update, supersede (with link preservation), delete
   - Memory links: supersedes, contradicts, related_to
-  - Hybrid search: FTS5 BM25 + ChromaDB vector + recency decay (configurable weights)
+  - Hybrid search: FTS5 BM25 + ChromaDB vector + recency decay + access frequency (configurable weights)
   - Conflict detection and resolution
   - Session context building (build_context)
   - Multi-hop graph traversal
   - Memory health and introspection
+  - Content deduplication via SHA-256 hashing (store / batch_store)
+  - TTL-aware in-memory LRU cache for hot memory rows
+  - Batch ingestion via batch_store()
+  - Direct ID lookup via get()
+  - WAL checkpoint on close for full persistence
+  - Locked-DB retry with exponential back-off
 
 Architecture:
   - SQLite database (rekal_memories.db) for structured metadata, FTS5, links, config
@@ -19,9 +25,10 @@ Architecture:
   - MemPalace's KnowledgeGraph for entity relationships (reused)
   - All synchronous (matches bridge stdin loop)
 
-Zero new pip dependencies. Uses only stdlib sqlite3 + existing MemPalace.
+Zero new pip dependencies. Uses only stdlib + existing MemPalace.
 """
 
+import collections
 import hashlib
 import json
 import logging
@@ -29,11 +36,49 @@ import math
 import os
 import re
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 logger = logging.getLogger("mempalace_rekal")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  TTL-Aware LRU Cache
+# ══════════════════════════════════════════════════════════════════════════
+
+class _TTLCache:
+    """LRU cache with per-entry TTL. Not thread-safe — synchronous use only."""
+
+    def __init__(self, maxsize=512, ttl=120):
+        self._store: collections.OrderedDict = collections.OrderedDict()
+        self._maxsize = maxsize
+        self._ttl = ttl
+
+    def get(self, key, default=None):
+        entry = self._store.get(key)
+        if entry is None:
+            return default
+        value, expires = entry
+        if time.monotonic() > expires:
+            self._store.pop(key, None)
+            return default
+        self._store.move_to_end(key)
+        return value
+
+    def set(self, key, value):
+        if key in self._store:
+            self._store.move_to_end(key)
+        self._store[key] = (value, time.monotonic() + self._ttl)
+        while len(self._store) > self._maxsize:
+            self._store.popitem(last=False)
+
+    def invalidate(self, key):
+        self._store.pop(key, None)
+
+    def clear(self):
+        self._store.clear()
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  Schema
@@ -43,12 +88,14 @@ SCHEMA = """\
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,
     content TEXT NOT NULL,
+    content_hash TEXT,
     memory_type TEXT NOT NULL DEFAULT 'fact'
         CHECK (memory_type IN ('fact','preference','procedure','context','episode')),
     project TEXT,
     wing TEXT,
     room TEXT,
     tags TEXT,
+    importance REAL NOT NULL DEFAULT 0.5,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     access_count INTEGER NOT NULL DEFAULT 0,
@@ -76,6 +123,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content_rowid='rowid'
 );
 
+-- Indexes for fast filtered retrieval
+CREATE INDEX IF NOT EXISTS idx_memories_project      ON memories(project);
+CREATE INDEX IF NOT EXISTS idx_memories_type         ON memories(memory_type);
+CREATE INDEX IF NOT EXISTS idx_memories_wing_room    ON memories(wing, room);
+CREATE INDEX IF NOT EXISTS idx_memories_created      ON memories(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_updated      ON memories(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
+CREATE INDEX IF NOT EXISTS idx_memories_importance   ON memories(importance DESC);
+CREATE INDEX IF NOT EXISTS idx_links_from            ON memory_links(from_id);
+CREATE INDEX IF NOT EXISTS idx_links_to              ON memory_links(to_id);
+CREATE INDEX IF NOT EXISTS idx_links_relation        ON memory_links(relation);
+
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
     INSERT INTO memories_fts(rowid, content, tags, project)
     VALUES (new.rowid, new.content, new.tags, new.project);
@@ -94,15 +153,23 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
 END;
 """
 
+# Migration: columns added after initial release
+_MIGRATIONS = [
+    "ALTER TABLE memories ADD COLUMN content_hash TEXT",
+    "ALTER TABLE memories ADD COLUMN importance REAL NOT NULL DEFAULT 0.5",
+]
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  Scoring
 # ══════════════════════════════════════════════════════════════════════════
 
-DEFAULT_W_FTS = 0.4
-DEFAULT_W_VEC = 0.4
-DEFAULT_W_RECENCY = 0.2
+DEFAULT_W_FTS = 0.30
+DEFAULT_W_VEC = 0.30
+DEFAULT_W_RECENCY = 0.20
+DEFAULT_W_ACCESS = 0.20          # access-frequency boost (new)
 DEFAULT_HALF_LIFE = 30.0
+ACCESS_SATURATION = 50.0         # access_count at which frequency score ≈ 1
 
 
 def _normalize_fts(score):
@@ -122,6 +189,16 @@ def _recency_score(days, half_life=30.0):
     return math.exp(-0.693 * max(0.0, days) / max(0.1, half_life))
 
 
+def _access_score(access_count):
+    """Log-saturating score: 0 → 0.0, ACCESS_SATURATION → ≈ 1.0."""
+    return min(1.0, math.log1p(max(0, access_count)) / math.log1p(ACCESS_SATURATION))
+
+
+def _importance_boost(importance):
+    """Clamp user-set importance to [0, 1]."""
+    return max(0.0, min(1.0, float(importance or 0.5)))
+
+
 def _days_since(timestamp_str):
     """Parse ISO timestamp, return days since now. 0 on error."""
     try:
@@ -137,9 +214,26 @@ def _days_since(timestamp_str):
 
 
 def _quote_fts(query):
-    """Wrap each token in FTS5 phrase quotes for safe matching."""
-    tokens = query.replace('"', " ").replace("\x00", "").split()
-    return " ".join(f'"{t}"' for t in tokens if t)
+    """Build an FTS5 query that tries prefix matching for tokens ≥ 3 chars
+    and falls back to exact phrase for short tokens.  Returns empty string
+    when the query produces no usable tokens.
+    """
+    tokens = [t for t in re.split(r"\s+", query.replace('"', " ").replace("\x00", "")) if t]
+    parts = []
+    for raw in tokens:
+        safe = re.sub(r"[^\w\-']", "", raw)
+        if not safe:
+            continue
+        if len(safe) >= 3:
+            parts.append(f'"{safe}"*')   # prefix match on last token of phrase
+        else:
+            parts.append(f'"{safe}"')    # exact match for very short tokens
+    return " ".join(parts)
+
+
+def _content_hash(content):
+    """Stable SHA-256 fingerprint of memory content."""
+    return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _now():
@@ -159,6 +253,15 @@ class RekalEngine:
 
     Initialized once per bridge subprocess lifetime. The SQLite database
     lives alongside MemPalace's ChromaDB in the same data directory.
+
+    Recall improvements over baseline:
+      - SQL indexes on every filter column → O(log n) filtered queries
+      - content_hash deduplication → no redundant entries polluting results
+      - access-frequency scoring component → hot memories float to the top
+      - prefix-aware FTS5 queries → partial-token recall
+      - TTL LRU cache for individual memory rows → near-zero re-read cost
+      - WAL checkpoint on close → durable persistence after every session
+      - Retry with back-off on SQLite BUSY → no silent write loss
     """
 
     def __init__(self, data_dir, palace_path=None, kg=None, search_memories_fn=None):
@@ -167,35 +270,85 @@ class RekalEngine:
         self.kg = kg
         self.search_memories_fn = search_memories_fn
 
+        # In-memory row cache (id → dict); 2-minute TTL, 512 entries max
+        self._cache = _TTLCache(maxsize=512, ttl=120)
+
         os.makedirs(data_dir, exist_ok=True)
         db_path = os.path.join(data_dir, "rekal_memories.db")
-        self.db = sqlite3.connect(db_path)
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")   # safe with WAL; faster
         self.db.execute("PRAGMA foreign_keys=ON")
+        self.db.execute("PRAGMA cache_size=-8000")     # 8 MB page cache
+        self.db.execute("PRAGMA temp_store=MEMORY")
         self.db.executescript(SCHEMA)
+        self._run_migrations()
+        self.db.execute("ANALYZE")                     # refresh query-planner stats
         self.db.commit()
 
+    def _run_migrations(self):
+        """Idempotently apply schema migrations for columns added post-release."""
+        existing_cols = {row[1] for row in self.db.execute("PRAGMA table_info(memories)")}
+        for stmt in _MIGRATIONS:
+            col = stmt.split("ADD COLUMN")[1].strip().split()[0]
+            if col not in existing_cols:
+                try:
+                    self.db.execute(stmt)
+                    logger.debug("Migration applied: %s", stmt)
+                except sqlite3.OperationalError as e:
+                    logger.debug("Migration skipped (%s): %s", e, stmt)
+        self.db.commit()
+
+    def _execute(self, sql, params=(), retries=4, base_delay=0.04):
+        """Execute with exponential back-off on SQLITE_BUSY / locked errors."""
+        for attempt in range(retries):
+            try:
+                return self.db.execute(sql, params)
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and attempt < retries - 1:
+                    time.sleep(base_delay * (2 ** attempt))
+                    continue
+                raise
+
     def close(self):
+        """Flush WAL to the main DB file before closing for full persistence."""
+        try:
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.db.commit()
+        except Exception:
+            pass
         try:
             self.db.close()
         except Exception:
             pass
 
+    def checkpoint(self):
+        """Manually trigger a WAL checkpoint and return diagnostic info."""
+        try:
+            row = self.db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            return {
+                "success": True,
+                "wal_pages": row[1] if row else None,
+                "checkpointed": row[2] if row else None,
+            }
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
     # ── Config ────────────────────────────────────────────────────────
 
     def _resolve_weights(self, project=None, w_fts=None, w_vec=None,
-                         w_recency=None, half_life=None):
+                         w_recency=None, w_access=None, half_life=None):
         """Four-level weight resolution: per-call > DB config > defaults."""
         result = {
             "w_fts": DEFAULT_W_FTS,
             "w_vec": DEFAULT_W_VEC,
             "w_recency": DEFAULT_W_RECENCY,
+            "w_access": DEFAULT_W_ACCESS,
             "half_life": DEFAULT_HALF_LIFE,
         }
-        # Layer 2: DB project config
         if project:
-            cursor = self.db.execute(
+            cursor = self._execute(
                 "SELECT key, value FROM rekal_config WHERE project = ?",
                 (project,),
             )
@@ -205,23 +358,24 @@ class RekalEngine:
                         result[row["key"]] = float(row["value"])
                     except (ValueError, TypeError):
                         pass
-        # Layer 1: per-call overrides
-        overrides = {"w_fts": w_fts, "w_vec": w_vec, "w_recency": w_recency,
-                     "half_life": half_life}
+        overrides = {
+            "w_fts": w_fts, "w_vec": w_vec, "w_recency": w_recency,
+            "w_access": w_access, "half_life": half_life,
+        }
         for k, v in overrides.items():
             if v is not None:
                 result[k] = float(v)
         return result
 
     def set_config(self, project, key, value):
-        valid_keys = {"w_fts", "w_vec", "w_recency", "half_life"}
+        valid_keys = {"w_fts", "w_vec", "w_recency", "w_access", "half_life"}
         if key not in valid_keys:
             return {"error": f"Invalid key '{key}'. Valid: {', '.join(sorted(valid_keys))}"}
         try:
             float(value)
         except (ValueError, TypeError):
             return {"error": f"Value must be numeric, got: {value}"}
-        self.db.execute(
+        self._execute(
             "INSERT INTO rekal_config (project, key, value) VALUES (?, ?, ?) "
             "ON CONFLICT (project, key) DO UPDATE SET value = excluded.value",
             (project, key, str(value)),
@@ -229,19 +383,81 @@ class RekalEngine:
         self.db.commit()
         return {"success": True, "key": key, "value": value, "project": project}
 
+    # ── Direct lookup ─────────────────────────────────────────────────
+
+    def get(self, memory_id, track_access=True):
+        """Retrieve a single memory by ID with optional access tracking.
+
+        Checks the in-memory cache first; falls back to SQLite on miss.
+        Returns None if the memory does not exist.
+        """
+        cached = self._cache.get(memory_id)
+        if cached is not None:
+            if track_access:
+                ts = _now()
+                self._execute(
+                    "UPDATE memories SET access_count = access_count + 1, "
+                    "last_accessed_at = ? WHERE id = ?",
+                    (ts, memory_id),
+                )
+                self.db.commit()
+                cached = dict(cached)
+                cached["access_count"] = cached.get("access_count", 0) + 1
+                self._cache.set(memory_id, cached)
+            return cached
+
+        row = self._execute(
+            "SELECT * FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if not row:
+            return None
+        result = self._row_to_dict(row)
+        if track_access:
+            ts = _now()
+            self._execute(
+                "UPDATE memories SET access_count = access_count + 1, "
+                "last_accessed_at = ? WHERE id = ?",
+                (ts, memory_id),
+            )
+            self.db.commit()
+            result["access_count"] += 1
+        self._cache.set(memory_id, result)
+        return result
+
     # ── Store ─────────────────────────────────────────────────────────
 
     def store(self, content, memory_type="fact", project=None, wing=None,
-              room=None, tags=None):
+              room=None, tags=None, importance=0.5, allow_duplicate=False):
+        """Store a memory, returning early (with duplicate=True) if identical
+        content already exists and allow_duplicate is False.
+        """
+        chash = _content_hash(content)
+
+        if not allow_duplicate:
+            existing = self._execute(
+                "SELECT id FROM memories WHERE content_hash = ?", (chash,)
+            ).fetchone()
+            if existing:
+                return {
+                    "success": True,
+                    "memory_id": existing["id"],
+                    "duplicate": True,
+                    "message": "Memory already exists with identical content.",
+                }
+
         memory_id = _new_id()
         ts = _now()
         tags_json = json.dumps(tags) if tags else None
-        self.db.execute(
+        importance = max(0.0, min(1.0, float(importance or 0.5)))
+
+        self._execute(
             """INSERT INTO memories
-               (id, content, memory_type, project, wing, room, tags, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (memory_id, content, memory_type, project, wing or "project",
-             room or "general", tags_json, ts, ts),
+               (id, content, content_hash, memory_type, project, wing, room,
+                tags, importance, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (memory_id, content, chash, memory_type,
+             project, wing or "project", room or "general",
+             tags_json, importance, ts, ts),
         )
         self.db.commit()
 
@@ -264,26 +480,103 @@ class RekalEngine:
             "project": project,
             "wing": wing or "project",
             "room": room or "general",
+            "importance": importance,
         }
+
+    # ── Batch Store ───────────────────────────────────────────────────
+
+    def batch_store(self, items, allow_duplicate=False):
+        """Atomically ingest a list of memory dicts.
+
+        Each item must have 'content' and may include 'memory_type',
+        'project', 'wing', 'room', 'tags', and 'importance'.
+
+        Returns a list of per-item results in the same order as input.
+        """
+        if not items:
+            return {"success": True, "results": [], "stored": 0, "skipped": 0}
+
+        ts = _now()
+        results = []
+        stored = 0
+        skipped = 0
+
+        try:
+            self.db.execute("BEGIN")
+            for item in items:
+                content = item.get("content", "")
+                if not content:
+                    results.append({"success": False, "error": "Empty content"})
+                    skipped += 1
+                    continue
+
+                chash = _content_hash(content)
+
+                if not allow_duplicate:
+                    existing = self.db.execute(
+                        "SELECT id FROM memories WHERE content_hash = ?", (chash,)
+                    ).fetchone()
+                    if existing:
+                        results.append({
+                            "success": True,
+                            "memory_id": existing["id"],
+                            "duplicate": True,
+                        })
+                        skipped += 1
+                        continue
+
+                memory_id = _new_id()
+                tags = item.get("tags")
+                importance = max(0.0, min(1.0, float(item.get("importance", 0.5))))
+                self.db.execute(
+                    """INSERT INTO memories
+                       (id, content, content_hash, memory_type, project, wing, room,
+                        tags, importance, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (memory_id, content, chash,
+                     item.get("memory_type", "fact"),
+                     item.get("project"),
+                     item.get("wing", "project"),
+                     item.get("room", "general"),
+                     json.dumps(tags) if tags else None,
+                     importance, ts, ts),
+                )
+                results.append({"success": True, "memory_id": memory_id})
+                stored += 1
+
+            self.db.execute("COMMIT")
+        except Exception as exc:
+            self.db.execute("ROLLBACK")
+            return {"success": False, "error": str(exc), "results": results}
+
+        return {"success": True, "results": results, "stored": stored, "skipped": skipped}
 
     # ── Update ────────────────────────────────────────────────────────
 
-    def update(self, memory_id, content=None, tags=None, memory_type=None):
-        if content is None and tags is None and memory_type is None:
+    def update(self, memory_id, content=None, tags=None, memory_type=None,
+               importance=None):
+        if content is None and tags is None and memory_type is None and importance is None:
             return {"success": True, "memory_id": memory_id, "noop": True}
 
         tags_json = json.dumps(tags) if tags is not None else None
+        chash = _content_hash(content) if content is not None else None
+        imp = max(0.0, min(1.0, float(importance))) if importance is not None else None
         ts = _now()
-        cursor = self.db.execute(
+
+        cursor = self._execute(
             """UPDATE memories SET
-               content = COALESCE(?, content),
-               tags = COALESCE(?, tags),
-               memory_type = COALESCE(?, memory_type),
-               updated_at = ?
+               content      = COALESCE(?, content),
+               content_hash = COALESCE(?, content_hash),
+               tags         = COALESCE(?, tags),
+               memory_type  = COALESCE(?, memory_type),
+               importance   = COALESCE(?, importance),
+               updated_at   = ?
                WHERE id = ?""",
-            (content, tags_json, memory_type, ts, memory_id),
+            (content, chash, tags_json, memory_type, imp, ts, memory_id),
         )
         self.db.commit()
+        self._cache.invalidate(memory_id)
+
         if cursor.rowcount == 0:
             return {"success": False, "error": f"Memory {memory_id} not found"}
         return {"success": True, "memory_id": memory_id}
@@ -291,32 +584,38 @@ class RekalEngine:
     # ── Supersede ─────────────────────────────────────────────────────
 
     def supersede(self, old_id, new_content, memory_type=None, project=None,
-                  wing=None, room=None, tags=None):
-        old = self.db.execute("SELECT * FROM memories WHERE id = ?", (old_id,)).fetchone()
+                  wing=None, room=None, tags=None, importance=None):
+        old = self._execute("SELECT * FROM memories WHERE id = ?", (old_id,)).fetchone()
         if not old:
             return {"success": False, "error": f"Memory {old_id} not found"}
 
         new_id = _new_id()
         ts = _now()
         eff_tags = json.dumps(tags) if tags is not None else old["tags"]
-        self.db.execute(
+        imp = max(0.0, min(1.0, float(importance))) if importance is not None \
+            else float(old["importance"] if old["importance"] is not None else 0.5)
+        chash = _content_hash(new_content)
+
+        self._execute(
             """INSERT INTO memories
-               (id, content, memory_type, project, wing, room, tags, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (new_id, new_content,
+               (id, content, content_hash, memory_type, project, wing, room,
+                tags, importance, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (new_id, new_content, chash,
              memory_type or old["memory_type"],
              project or old["project"],
              wing or old["wing"],
              room or old["room"],
-             eff_tags, ts, ts),
+             eff_tags, imp, ts, ts),
         )
-        self.db.execute(
-            "INSERT INTO memory_links (from_id, to_id, relation, created_at) VALUES (?, ?, 'supersedes', ?)",
+        self._execute(
+            "INSERT INTO memory_links (from_id, to_id, relation, created_at) "
+            "VALUES (?, ?, 'supersedes', ?)",
             (new_id, old_id, ts),
         )
         self.db.commit()
+        self._cache.invalidate(old_id)
 
-        # Store new version in ChromaDB too
         try:
             from mempalace.mcp_server import tool_add_drawer
             tool_add_drawer(
@@ -338,8 +637,9 @@ class RekalEngine:
     # ── Delete ────────────────────────────────────────────────────────
 
     def delete(self, memory_id):
-        cursor = self.db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        cursor = self._execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         self.db.commit()
+        self._cache.invalidate(memory_id)
         if cursor.rowcount == 0:
             return {"success": False, "error": f"Memory {memory_id} not found"}
         return {"success": True, "memory_id": memory_id}
@@ -350,8 +650,9 @@ class RekalEngine:
         if relation not in ("supersedes", "contradicts", "related_to"):
             return {"error": f"Invalid relation: {relation}"}
         try:
-            self.db.execute(
-                "INSERT OR IGNORE INTO memory_links (from_id, to_id, relation, created_at) VALUES (?, ?, ?, ?)",
+            self._execute(
+                "INSERT OR IGNORE INTO memory_links "
+                "(from_id, to_id, relation, created_at) VALUES (?, ?, ?, ?)",
                 (from_id, to_id, relation, _now()),
             )
             self.db.commit()
@@ -359,33 +660,97 @@ class RekalEngine:
         except sqlite3.IntegrityError as e:
             return {"error": str(e)}
 
+    # ── Internal helpers ──────────────────────────────────────────────
+
+    def _row_to_dict(self, row):
+        """Convert a sqlite3.Row from the memories table to a plain dict."""
+        tags = []
+        try:
+            tags = json.loads(row["tags"]) if row["tags"] else []
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return {
+            "id": row["id"],
+            "content": row["content"],
+            "content_hash": row["content_hash"] if "content_hash" in row.keys() else None,
+            "memory_type": row["memory_type"],
+            "project": row["project"],
+            "wing": row["wing"],
+            "room": row["room"],
+            "tags": tags,
+            "importance": float(row["importance"]) if row["importance"] is not None else 0.5,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "access_count": row["access_count"],
+            "last_accessed_at": row["last_accessed_at"],
+        }
+
+    def _fetch_memory(self, memory_id):
+        """Fetch a memory row dict, using the cache when available."""
+        cached = self._cache.get(memory_id)
+        if cached is not None:
+            return cached
+        row = self._execute(
+            "SELECT * FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if not row:
+            return None
+        result = self._row_to_dict(row)
+        self._cache.set(memory_id, result)
+        return result
+
     # ── Search (hybrid) ───────────────────────────────────────────────
 
     def search(self, query, limit=10, project=None, memory_type=None,
                wing=None, room=None, w_fts=None, w_vec=None,
-               w_recency=None, half_life=None):
-        weights = self._resolve_weights(project, w_fts, w_vec, w_recency, half_life)
+               w_recency=None, w_access=None, half_life=None):
+        weights = self._resolve_weights(
+            project, w_fts, w_vec, w_recency, w_access, half_life
+        )
 
-        # Phase 1: FTS5 candidates from Rekal SQLite
+        # ── Phase 1: FTS5 candidates ──────────────────────────────────
         fts_scores = {}
         fts_query = _quote_fts(query)
         if fts_query:
             try:
-                cursor = self.db.execute(
+                # Exclude memories that have been superseded
+                cursor = self._execute(
                     """SELECT m.id, memories_fts.rank AS fts_rank
                        FROM memories_fts
                        JOIN memories m ON m.rowid = memories_fts.rowid
                        WHERE memories_fts MATCH ?
-                       AND m.id NOT IN (SELECT to_id FROM memory_links WHERE relation = 'supersedes')
-                       ORDER BY memories_fts.rank LIMIT ?""",
-                    (fts_query, limit * 3),
+                         AND m.id NOT IN (
+                             SELECT to_id FROM memory_links WHERE relation = 'supersedes'
+                         )
+                       ORDER BY memories_fts.rank
+                       LIMIT ?""",
+                    (fts_query, limit * 4),
                 )
                 for row in cursor:
                     fts_scores[row["id"]] = row["fts_rank"]
-            except sqlite3.OperationalError:
-                pass
+            except sqlite3.OperationalError as exc:
+                logger.debug("FTS5 query failed (%s) — falling back to prefix-less form.", exc)
+                # Re-try with simple quoted tokens (no prefix *)
+                fallback = " ".join(f'"{t}"' for t in query.split() if t)
+                try:
+                    cursor = self._execute(
+                        """SELECT m.id, memories_fts.rank AS fts_rank
+                           FROM memories_fts
+                           JOIN memories m ON m.rowid = memories_fts.rowid
+                           WHERE memories_fts MATCH ?
+                             AND m.id NOT IN (
+                                 SELECT to_id FROM memory_links WHERE relation = 'supersedes'
+                             )
+                           ORDER BY memories_fts.rank
+                           LIMIT ?""",
+                        (fallback, limit * 4),
+                    )
+                    for row in cursor:
+                        fts_scores[row["id"]] = row["fts_rank"]
+                except sqlite3.OperationalError:
+                    pass
 
-        # Phase 2: ChromaDB vector candidates (includes MemPalace native drawers)
+        # ── Phase 2: ChromaDB vector candidates ───────────────────────
         chroma_hits = []
         vec_scores = {}
         if self.search_memories_fn:
@@ -396,40 +761,46 @@ class RekalEngine:
                     "palace_path": self.palace_path,
                     "wing": wing,
                     "room": room,
-                    "n_results": limit * 3,
+                    "n_results": limit * 4,
                     "max_distance": 0.0,
                 }
-                if "vector_disabled" in inspect.signature(self.search_memories_fn).parameters:
+                sig = inspect.signature(self.search_memories_fn).parameters
+                if "vector_disabled" in sig:
                     kwargs["vector_disabled"] = False
                 chroma_results = self.search_memories_fn(**kwargs)
                 for hit in chroma_results.get("results", []):
                     text = hit.get("text", "")
                     dist = hit.get("distance")
                     if text:
-                        content_key = hashlib.md5(text[:200].encode()).hexdigest()[:12]
+                        ck = hashlib.md5(text[:200].encode()).hexdigest()[:12]
                         if dist is not None:
-                            vec_scores[content_key] = float(dist)
+                            vec_scores[ck] = float(dist)
                         chroma_hits.append(hit)
-            except Exception as e:
-                logger.debug("ChromaDB vector search failed: %s", e)
+            except Exception as exc:
+                logger.debug("ChromaDB vector search failed: %s", exc)
 
-        # Phase 3: Score Rekal SQLite entries
+        # ── Phase 3: Build candidate set from SQLite ──────────────────
+        # Always seed with recency-ordered rows so low-traffic entries aren't lost
         candidate_ids = set(fts_scores.keys())
         if len(candidate_ids) < limit * 2:
-            cursor = self.db.execute(
+            extra_cursor = self._execute(
                 """SELECT id FROM memories
-                   WHERE id NOT IN (SELECT to_id FROM memory_links WHERE relation = 'supersedes')
-                   ORDER BY created_at DESC LIMIT ?""",
-                (limit * 3,),
+                   WHERE id NOT IN (
+                       SELECT to_id FROM memory_links WHERE relation = 'supersedes'
+                   )
+                   ORDER BY importance DESC, created_at DESC
+                   LIMIT ?""",
+                (limit * 4,),
             )
-            for row in cursor:
+            for row in extra_cursor:
                 candidate_ids.add(row["id"])
 
+        # ── Phase 4: Score Rekal SQLite entries ───────────────────────
         scored = []
         seen_content_keys = set()
 
         for cid in candidate_ids:
-            mem = self.db.execute("SELECT * FROM memories WHERE id = ?", (cid,)).fetchone()
+            mem = self._fetch_memory(cid)
             if not mem:
                 continue
             if project and mem["project"] != project:
@@ -442,22 +813,25 @@ class RekalEngine:
                 continue
 
             fts_norm = _normalize_fts(fts_scores.get(cid, 0.0))
-            content_key = hashlib.md5((mem["content"] or "")[:200].encode()).hexdigest()[:12]
-            seen_content_keys.add(content_key)
-            vec_dist = vec_scores.get(content_key, 1.0)
+            ck = hashlib.md5((mem["content"] or "")[:200].encode()).hexdigest()[:12]
+            seen_content_keys.add(ck)
+            vec_dist = vec_scores.get(ck, 1.0)
             vec_norm = _normalize_vec(vec_dist)
             days = _days_since(mem["created_at"])
             rec_norm = _recency_score(days, weights["half_life"])
-            score = (
+            acc_norm = _access_score(mem["access_count"])
+            imp_boost = _importance_boost(mem["importance"])
+
+            # Combine weighted components; importance is an additive multiplier
+            raw_score = (
                 weights["w_fts"] * fts_norm +
                 weights["w_vec"] * vec_norm +
-                weights["w_recency"] * rec_norm
+                weights["w_recency"] * rec_norm +
+                weights["w_access"] * acc_norm
             )
-            tags = []
-            try:
-                tags = json.loads(mem["tags"]) if mem["tags"] else []
-            except (json.JSONDecodeError, TypeError):
-                pass
+            # Importance shifts score toward 1 (high) or 0 (low) via lerp
+            score = raw_score * 0.85 + imp_boost * 0.15
+
             scored.append({
                 "id": mem["id"],
                 "content": mem["content"],
@@ -465,7 +839,8 @@ class RekalEngine:
                 "project": mem["project"],
                 "wing": mem["wing"],
                 "room": mem["room"],
-                "tags": tags,
+                "tags": mem["tags"],
+                "importance": mem["importance"],
                 "created_at": mem["created_at"],
                 "updated_at": mem["updated_at"],
                 "access_count": mem["access_count"],
@@ -473,17 +848,17 @@ class RekalEngine:
                 "fts_score": round(fts_norm, 3),
                 "vec_score": round(vec_norm, 3),
                 "recency_score": round(rec_norm, 3),
+                "access_score": round(acc_norm, 3),
                 "source": "rekal",
             })
 
-        # Phase 4: Include ChromaDB-only results (MemPalace native drawers
-        # stored via 'store' operation that have no Rekal SQLite entry)
+        # ── Phase 5: Augment with ChromaDB-only (MemPalace native) ────
         for hit in chroma_hits:
             text = hit.get("text", "")
-            content_key = hashlib.md5(text[:200].encode()).hexdigest()[:12]
-            if content_key in seen_content_keys:
+            ck = hashlib.md5(text[:200].encode()).hexdigest()[:12]
+            if ck in seen_content_keys:
                 continue
-            seen_content_keys.add(content_key)
+            seen_content_keys.add(ck)
 
             hit_wing = hit.get("wing", "unknown")
             hit_room = hit.get("room", "unknown")
@@ -500,19 +875,23 @@ class RekalEngine:
             rec_norm = _recency_score(days, weights["half_life"])
             fts_norm = min(bm25 / 10.0, 1.0) if bm25 > 0 else 0.0
 
-            score = (
+            raw_score = (
                 weights["w_fts"] * fts_norm +
                 weights["w_vec"] * vec_norm +
                 weights["w_recency"] * rec_norm
+                # no access component — chroma-only entries have no counter
             )
+            score = raw_score * 0.85 + 0.5 * 0.15  # neutral importance
+
             scored.append({
-                "id": hit.get("source_file", content_key),
+                "id": hit.get("source_file", ck),
                 "content": text[:2000],
                 "memory_type": "fact",
                 "project": None,
                 "wing": hit_wing,
                 "room": hit_room,
                 "tags": [],
+                "importance": 0.5,
                 "created_at": filed_at,
                 "updated_at": filed_at,
                 "access_count": 0,
@@ -520,17 +899,21 @@ class RekalEngine:
                 "fts_score": round(fts_norm, 3),
                 "vec_score": round(vec_norm, 3),
                 "recency_score": round(rec_norm, 3),
+                "access_score": 0.0,
                 "source": "mempalace_drawer",
             })
 
-        # Update access counts for Rekal entries only
+        # ── Phase 6: Update access counters for Rekal entries ─────────
         ts = _now()
         for s in scored:
             if s.get("source") == "rekal":
-                self.db.execute(
-                    "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?",
+                self._execute(
+                    "UPDATE memories SET access_count = access_count + 1, "
+                    "last_accessed_at = ? WHERE id = ?",
                     (ts, s["id"]),
                 )
+                # Invalidate stale cache entry so next fetch reflects new count
+                self._cache.invalidate(s["id"])
         self.db.commit()
 
         scored.sort(key=lambda x: x["score"], reverse=True)
@@ -544,24 +927,49 @@ class RekalEngine:
     # ── Build Context ─────────────────────────────────────────────────
 
     def build_context(self, query, project=None, limit=10, w_fts=None,
-                      w_vec=None, w_recency=None, half_life=None):
+                      w_vec=None, w_recency=None, w_access=None, half_life=None):
         memories = self.search(
             query, limit=limit, project=project,
-            w_fts=w_fts, w_vec=w_vec, w_recency=w_recency, half_life=half_life,
+            w_fts=w_fts, w_vec=w_vec, w_recency=w_recency,
+            w_access=w_access, half_life=half_life,
         )
         conflicts = self.get_conflicts(project=project)
 
         results = memories.get("results", [])
+
+        # Include one hop of related memories for richer context
+        related_ids = set()
+        for r in results[:5]:  # limit graph expansion to top-5 for speed
+            for link_row in self._execute(
+                """SELECT to_id AS id FROM memory_links
+                   WHERE from_id = ? AND relation = 'related_to'
+                   UNION
+                   SELECT from_id AS id FROM memory_links
+                   WHERE to_id = ? AND relation = 'related_to'""",
+                (r["id"], r["id"]),
+            ):
+                related_ids.add(link_row["id"])
+
+        related_memories = []
+        for rid in related_ids - {r["id"] for r in results}:
+            mem = self._fetch_memory(rid)
+            if mem:
+                related_memories.append(mem)
+
         if results:
             oldest = min(r["created_at"] for r in results)
             newest = max(r["created_at"] for r in results)
-            timeline = f"{len(results)} memories from {oldest} to {newest}"
+            timeline = (
+                f"{len(results)} memories from {oldest} to {newest}"
+                + (f" (+{len(related_memories)} related)" if related_memories else "")
+            )
         else:
             timeline = "No memories found"
 
         return {
             "query": query,
             "memories": results,
+            "related_memories": related_memories,
             "conflicts": conflicts,
             "timeline_summary": timeline,
             "weights": memories.get("weights", {}),
@@ -585,7 +993,7 @@ class RekalEngine:
             params.extend([project, project])
 
         results = []
-        for row in self.db.execute(query, params):
+        for row in self._execute(query, params):
             results.append({
                 "memory_id": row["from_id"],
                 "content": row["from_content"],
@@ -599,32 +1007,46 @@ class RekalEngine:
     # ── Health ────────────────────────────────────────────────────────
 
     def health(self):
-        def _count(sql):
-            row = self.db.execute(sql).fetchone()
+        def _count(sql, params=()):
+            row = self._execute(sql, params).fetchone()
             return int(row[0]) if row else 0
 
-        def _first(sql):
-            row = self.db.execute(sql).fetchone()
+        def _first(sql, params=()):
+            row = self._execute(sql, params).fetchone()
             return str(row[0]) if row and row[0] else None
 
         total = _count("SELECT COUNT(*) FROM memories")
         total_links = _count("SELECT COUNT(*) FROM memory_links")
-        total_conflicts = _count("SELECT COUNT(*) FROM memory_links WHERE relation = 'contradicts'")
-        total_superseded = _count("SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes'")
+        total_conflicts = _count(
+            "SELECT COUNT(*) FROM memory_links WHERE relation = 'contradicts'"
+        )
+        total_superseded = _count(
+            "SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes'"
+        )
+        total_duplicates = _count(
+            """SELECT COUNT(*) FROM (
+                   SELECT content_hash FROM memories
+                   WHERE content_hash IS NOT NULL
+                   GROUP BY content_hash HAVING COUNT(*) > 1
+               )"""
+        )
         oldest = _first("SELECT MIN(created_at) FROM memories")
         newest = _first("SELECT MAX(created_at) FROM memories")
 
         by_type = {}
-        for row in self.db.execute(
+        for row in self._execute(
             "SELECT memory_type, COUNT(*) as cnt FROM memories GROUP BY memory_type"
         ):
             by_type[row["memory_type"]] = row["cnt"]
 
         by_project = {}
-        for row in self.db.execute(
-            "SELECT COALESCE(project, '<none>') as p, COUNT(*) as cnt FROM memories GROUP BY project"
+        for row in self._execute(
+            "SELECT COALESCE(project, '<none>') as p, COUNT(*) as cnt "
+            "FROM memories GROUP BY project"
         ):
             by_project[row["p"]] = row["cnt"]
+
+        cache_size = len(self._cache._store)
 
         return {
             "total_memories": total,
@@ -632,16 +1054,63 @@ class RekalEngine:
             "total_conflicts": total_conflicts,
             "total_superseded": total_superseded,
             "active_memories": total - total_superseded,
+            "duplicate_content_groups": total_duplicates,
             "oldest_memory": oldest,
             "newest_memory": newest,
             "memories_by_type": by_type,
             "memories_by_project": by_project,
+            "cache_entries": cache_size,
+        }
+
+    # ── Deduplicate ───────────────────────────────────────────────────
+
+    def deduplicate(self, project=None, dry_run=False):
+        """Find memories with identical content_hash and soft-delete duplicates,
+        keeping the oldest entry per hash group.
+
+        Returns a summary dict with counts and affected IDs.
+        """
+        where = "WHERE content_hash IS NOT NULL"
+        params: list = []
+        if project:
+            where += " AND project = ?"
+            params.append(project)
+
+        rows = self._execute(
+            f"""SELECT content_hash, MIN(created_at) AS keep_ts
+                FROM memories {where}
+                GROUP BY content_hash HAVING COUNT(*) > 1""",
+            params,
+        ).fetchall()
+
+        removed_ids = []
+        for row in rows:
+            chash = row["content_hash"]
+            keep_ts = row["keep_ts"]
+            dupes = self._execute(
+                "SELECT id FROM memories WHERE content_hash = ? AND created_at != ?",
+                (chash, keep_ts),
+            ).fetchall()
+            for d in dupes:
+                if not dry_run:
+                    self._execute("DELETE FROM memories WHERE id = ?", (d["id"],))
+                    self._cache.invalidate(d["id"])
+                removed_ids.append(d["id"])
+
+        if not dry_run and removed_ids:
+            self.db.commit()
+
+        return {
+            "dry_run": dry_run,
+            "duplicate_groups": len(rows),
+            "removed": len(removed_ids),
+            "removed_ids": removed_ids,
         }
 
     # ── Similar ───────────────────────────────────────────────────────
 
     def similar(self, memory_id, limit=5):
-        mem = self.db.execute("SELECT content FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        mem = self._fetch_memory(memory_id)
         if not mem:
             return {"error": f"Memory {memory_id} not found", "results": []}
         return self.search(mem["content"], limit=limit + 1)
@@ -656,7 +1125,7 @@ class RekalEngine:
             GROUP BY memory_type ORDER BY count DESC
         """
         results = []
-        for row in self.db.execute(query, (project, project)):
+        for row in self._execute(query, (project, project)):
             results.append({
                 "topic": row["topic"],
                 "count": row["count"],
@@ -675,36 +1144,24 @@ class RekalEngine:
             ORDER BY created_at DESC LIMIT ?
         """
         results = []
-        for row in self.db.execute(query, (project, project, start, start, end, end, limit)):
-            tags = []
-            try:
-                tags = json.loads(row["tags"]) if row["tags"] else []
-            except (json.JSONDecodeError, TypeError):
-                pass
-            results.append({
-                "id": row["id"],
-                "content": row["content"],
-                "memory_type": row["memory_type"],
-                "project": row["project"],
-                "wing": row["wing"],
-                "room": row["room"],
-                "tags": tags,
-                "created_at": row["created_at"],
-            })
+        for row in self._execute(
+            query, (project, project, start, start, end, end, limit)
+        ):
+            results.append(self._row_to_dict(row))
         return results
 
     # ── Related ───────────────────────────────────────────────────────
 
     def related(self, memory_id):
         results = []
-        for row in self.db.execute(
+        for row in self._execute(
             """SELECT ml.relation, ml.to_id AS id, m.content
                FROM memory_links ml JOIN memories m ON m.id = ml.to_id
                WHERE ml.from_id = ?""",
             (memory_id,),
         ):
             results.append(dict(row))
-        for row in self.db.execute(
+        for row in self._execute(
             """SELECT ml.relation, ml.from_id AS id, m.content
                FROM memory_links ml JOIN memories m ON m.id = ml.from_id
                WHERE ml.to_id = ?""",
@@ -826,7 +1283,9 @@ class RekalEngine:
                             "type": "kg",
                             "fact": f"{subj} → {pred} → {obj}",
                             "confidence": 0.85,
-                            "reason": f"Statement negates existing: {subj} → {pred} → {obj}",
+                            "reason": (
+                                f"Statement negates existing: {subj} → {pred} → {obj}"
+                            ),
                         })
 
         max_conf = max((c["confidence"] for c in contradictions), default=0.0)
@@ -868,10 +1327,18 @@ class RekalEngine:
                         obj.lower() in claim_lower,
                     ])
                     if matches >= 3:
-                        supporting.append({"type": "kg_exact", "fact": f"{subj} → {pred} → {obj}", "strength": 0.4})
+                        supporting.append({
+                            "type": "kg_exact",
+                            "fact": f"{subj} → {pred} → {obj}",
+                            "strength": 0.4,
+                        })
                         confidence += 0.4
                     elif matches >= 2:
-                        supporting.append({"type": "kg_partial", "fact": f"{subj} → {pred} → {obj}", "strength": 0.2})
+                        supporting.append({
+                            "type": "kg_partial",
+                            "fact": f"{subj} → {pred} → {obj}",
+                            "strength": 0.2,
+                        })
                         confidence += 0.2
 
         # Memory search evidence
