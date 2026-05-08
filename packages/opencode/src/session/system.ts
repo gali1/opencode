@@ -37,7 +37,7 @@ export interface Interface {
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
 }
 
-export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") { }
 
 export const layer = Layer.effect(
   Service,
@@ -58,6 +58,18 @@ export const layer = Layer.effect(
             `  Platform: ${process.platform}`,
             `  Today's date: ${new Date().toDateString()}`,
             `</env>`,
+            ``,
+            `<memory_system>`,
+            `You have access to MemPalace — a persistent, local memory system that survives across sessions.`,
+            `Relevant memories from previous sessions may be automatically injected into your context inside <mempalace_context> tags.`,
+            ``,
+            `Rules for using retrieved memories:`,
+            `- NEVER blindly trust retrieved memory. Always validate against current file state and session context.`,
+            `- If a memory contradicts current code or files, trust the code — the memory may be stale.`,
+            `- Use the mempalace tool explicitly when you need to store important decisions, search for specific history, or manage the knowledge graph.`,
+            `- Significant discoveries, architecture decisions, and resolved bugs are automatically stored after each response.`,
+            `- You can proactively store or search memory using the mempalace tool when automatic retrieval is insufficient.`,
+            `</memory_system>`,
           ].join("\n"),
         ]
       }),

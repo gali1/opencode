@@ -13,6 +13,7 @@ import { MessageV2 } from "./message-v2"
 import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
+import { InstanceState } from "@/effect/instance-state"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
@@ -28,6 +29,11 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import * as DateTime from "effect/DateTime"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import {
+  ensureMempalaceBridge,
+  mempalaceIpcCall,
+  getMempalaceDataDir,
+} from "@/tool/mempalace"
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -82,7 +88,7 @@ interface ProcessorContext extends Input {
 
 type StreamEvent = LLMEvent
 
-export class Service extends Context.Service<Service, Interface>()("@opencode/SessionProcessor") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode/SessionProcessor") { }
 
 export const layer = Layer.effect(
   Service,
@@ -498,6 +504,38 @@ export const layer = Layer.effect(
               })
             }
             yield* completeToolCall(value.id, output)
+
+            // ── MemPalace: async store significant tool outputs ────────
+            yield* Effect.gen(function* () {
+              if (!output || typeof output.output !== "string") return
+              const text = output.output as string
+              if (text.length < 100) return
+              const toolName = toolCall ? toolCall.part.tool : "unknown"
+              const skipTools = new Set([
+                "read",
+                "glob",
+                "grep",
+                "list",
+                "search",
+                "smart_search",
+                "status",
+                "invalid",
+                "question",
+                "mempalace",
+              ])
+              if (skipTools.has(toolName)) return
+              const insCtx = yield* InstanceState.context
+              const dataDir = getMempalaceDataDir(insCtx.worktree)
+              yield* Effect.promise(() => ensureMempalaceBridge(dataDir))
+              yield* Effect.promise(() =>
+                mempalaceIpcCall({
+                  operation: "store",
+                  wing: "project",
+                  room: "tool_outputs",
+                  content: `[${toolName}] ${((output as Record<string, unknown>).title || "").toString().substring(0, 100)}\n${text.substring(0, 2000)}`,
+                }),
+              )
+            }).pipe(Effect.ignore, Effect.forkIn(scope))
             return
           }
 

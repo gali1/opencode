@@ -61,6 +61,11 @@ import { referencePromptMetadata, referenceTextPart } from "./prompt/reference"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import {
+  ensureMempalaceBridge,
+  mempalaceIpcCall,
+  getMempalaceDataDir,
+} from "@/tool/mempalace"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -90,7 +95,7 @@ export interface Interface {
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
 }
 
-export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") { }
 
 export const layer = Layer.effect(
   Service,
@@ -1236,7 +1241,10 @@ export const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
-    const runLoop: (sessionID: SessionID) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.run")(
+    // FIX 1: Removed the explicit `(sessionID: SessionID) => Effect.Effect<MessageV2.WithParts>`
+    // type annotation. The annotation constrained the error channel to `never` but Effect.fn
+    // infers `unknown`, causing TS2322. Letting TypeScript infer the full type resolves this.
+    const runLoop = Effect.fn("SessionPrompt.run")(
       function* (sessionID: SessionID) {
         const ctx = yield* InstanceState.context
         const slog = elog.with({ sessionID })
@@ -1275,13 +1283,48 @@ export const layer = Layer.effect(
           }
 
           step++
-          if (step === 1)
+          if (step === 1) {
             yield* title({
               session,
               modelID: lastUser.model.modelID,
               providerID: lastUser.model.providerID,
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
+
+            // ── MemPalace session diary — start entry ──────────────────
+            // FIX 2: Replaced Effect.catchAll(() => Effect.void) with Effect.ignore.
+            // Effect.catchAll does not exist in effect@4.0.0-beta.57; Effect.ignore
+            // is the correct replacement when all errors should be silently suppressed.
+            yield* Effect.gen(function* () {
+              const dataDir = getMempalaceDataDir(ctx.worktree)
+              yield* Effect.promise(() => ensureMempalaceBridge(dataDir))
+              const firstUserText = msgs
+                .filter((m) => m.info.role === "user")
+                .flatMap((m) =>
+                  m.parts
+                    .filter(
+                      (p) =>
+                        p.type === "text" &&
+                        !("synthetic" in p && p.synthetic) &&
+                        !("ignored" in p && p.ignored),
+                    )
+                    .map((p) => (p as MessageV2.TextPart).text.trim()),
+                )
+                .filter(Boolean)
+                .join(" ")
+                .substring(0, 500)
+              if (!firstUserText) return
+              yield* Effect.promise(() =>
+                mempalaceIpcCall({
+                  operation: "diary_write",
+                  agent_name: "opencode",
+                  entry: `Session started. User intent: ${firstUserText}`,
+                  topic: "session",
+                  wing: "project",
+                }),
+              )
+            }).pipe(Effect.ignore, Effect.forkIn(scope))
+          }
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
           const task = tasks.pop()
@@ -1423,6 +1466,60 @@ export const layer = Layer.effect(
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
             const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+
+            // ── MemPalace auto-retrieval ─────────────────────────────────
+            yield* Effect.gen(function* () {
+              const dataDir = getMempalaceDataDir(ctx.worktree)
+              yield* Effect.promise(() => ensureMempalaceBridge(dataDir))
+              const queryParts: string[] = []
+              const recentMsgs = msgs.slice(-4)
+              for (const m of recentMsgs) {
+                if (m.info.role !== "user") continue
+                for (const p of m.parts) {
+                  if (
+                    p.type === "text" &&
+                    !("synthetic" in p && p.synthetic) &&
+                    !("ignored" in p && p.ignored) &&
+                    p.text.trim()
+                  ) {
+                    queryParts.push(p.text.trim())
+                  }
+                }
+              }
+              const query = queryParts.join(" ").slice(0, 500)
+              if (!query) return
+              const raw = yield* Effect.promise(() =>
+                mempalaceIpcCall({
+                  operation: "memory_search",
+                  query,
+                  limit: 3,
+                }),
+              )
+              const envelope = raw as Record<string, unknown>
+              const results = ((envelope?.results ?? []) as Array<Record<string, unknown>>).filter(
+                (r) => typeof r.similarity === "number" && (r.similarity as number) > 0.3,
+              )
+              if (!results.length) return
+              const memoryLines = results
+                .map((r, i) => {
+                  const sim = (r.similarity as number).toFixed(3)
+                  const wing = r.wing ?? "project"
+                  const room = r.room ?? "general"
+                  const text = String(r.text ?? "").substring(0, 800)
+                  return `[${i + 1}] sim=${sim} ${wing}/${room}\n${text}`
+                })
+                .join("\n\n")
+              if (memoryLines.trim()) {
+                system.push(
+                  [
+                    "<mempalace_context>",
+                    "Retrieved from persistent memory. Validate against current state before relying on them:",
+                    memoryLines,
+                    "</mempalace_context>",
+                  ].join("\n"),
+                )
+              }
+            }).pipe(Effect.ignore)
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
@@ -1457,6 +1554,42 @@ export const layer = Layer.effect(
               }
             }
 
+            // ── MemPalace auto-storage ────────────────────────────────
+            // FIX 4: Replaced Effect.catchAll(() => Effect.void) with Effect.ignore.
+            yield* Effect.gen(function* () {
+              if (result !== "continue") return
+              const dataDir = getMempalaceDataDir(ctx.worktree)
+              yield* Effect.promise(() => ensureMempalaceBridge(dataDir))
+              const storeParts = MessageV2.parts(handle.message.id)
+              const textContent = storeParts
+                .filter((p): p is MessageV2.TextPart => p.type === "text")
+                .map((p) => p.text)
+                .join("\n")
+                .trim()
+              const toolSummaries = storeParts
+                .filter(
+                  (p): p is MessageV2.ToolPart =>
+                    p.type === "tool" && p.state.status === "completed",
+                )
+                .map((p) => {
+                  const st = p.state as MessageV2.ToolStateCompleted
+                  return `[${p.tool}] ${st.title || ""}: ${String(st.output).substring(0, 300)}`
+                })
+                .join("\n")
+              const storeContent = [textContent, toolSummaries]
+                .filter(Boolean)
+                .join("\n\n---\n\n")
+              if (storeContent.length < 50) return
+              yield* Effect.promise(() =>
+                mempalaceIpcCall({
+                  operation: "store",
+                  wing: "project",
+                  room: "conversation",
+                  content: storeContent.substring(0, 4000),
+                }),
+              )
+            }).pipe(Effect.ignore, Effect.forkIn(scope))
+
             if (result === "stop") return "break" as const
             if (result === "compact") {
               yield* compaction.create({
@@ -1477,6 +1610,23 @@ export const layer = Layer.effect(
         }
 
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
+
+        // ── MemPalace session diary — end entry ────────────────────
+        // FIX 5: Replaced Effect.catchAll(() => Effect.void) with Effect.ignore.
+        yield* Effect.gen(function* () {
+          const dataDir = getMempalaceDataDir(ctx.worktree)
+          yield* Effect.promise(() => ensureMempalaceBridge(dataDir))
+          yield* Effect.promise(() =>
+            mempalaceIpcCall({
+              operation: "diary_write",
+              agent_name: "opencode",
+              entry: `Session ended after ${step} steps. SessionID: ${sessionID}`,
+              topic: "session",
+              wing: "project",
+            }),
+          )
+        }).pipe(Effect.ignore, Effect.forkIn(scope))
+
         return yield* lastAssistant(sessionID)
       },
     )
@@ -1570,15 +1720,15 @@ export const layer = Layer.effect(
       const isSubtask = (agent.mode === "subagent" && cmd.subtask !== false) || cmd.subtask === true
       const parts = isSubtask
         ? [
-            {
-              type: "subtask" as const,
-              agent: agent.name,
-              description: cmd.description ?? "",
-              command: input.command,
-              model: { providerID: taskModel.providerID, modelID: taskModel.modelID },
-              prompt: templateParts.find((y) => y.type === "text")?.text ?? "",
-            },
-          ]
+          {
+            type: "subtask" as const,
+            agent: agent.name,
+            description: cmd.description ?? "",
+            command: input.command,
+            model: { providerID: taskModel.providerID, modelID: taskModel.modelID },
+            prompt: templateParts.find((y) => y.type === "text")?.text ?? "",
+          },
+        ]
         : [...templateParts, ...(input.parts ?? [])]
 
       const userAgent = isSubtask ? (input.agent ?? (yield* agents.defaultInfo()).name) : agent.name
