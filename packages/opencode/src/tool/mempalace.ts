@@ -92,6 +92,8 @@ let _buffer = ""
 let _pending: Array<{ resolve: (line: string) => void; reject: (err: Error) => void }> = []
 let _initPromise: Promise<void> | null = null
 let _currentDataDir = ""
+let _lastFailureTime = 0
+const _FAILURE_COOLDOWN_MS = 120_000
 
 function _spawnBridge(dataDir: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -195,6 +197,10 @@ function ensureBridge(dataDir: string): Promise<void> {
     return Promise.resolve()
   }
 
+  if (_lastFailureTime > 0 && Date.now() - _lastFailureTime < _FAILURE_COOLDOWN_MS) {
+    return Promise.reject(new Error("mempalace bridge unavailable (cooldown)"))
+  }
+
   if (_proc && _proc.exitCode === null && _currentDataDir !== dataDir) {
     _proc.kill("SIGTERM")
     _proc = null
@@ -202,7 +208,11 @@ function ensureBridge(dataDir: string): Promise<void> {
   }
 
   if (!_initPromise) {
-    _initPromise = _spawnBridge(dataDir)
+    _initPromise = _spawnBridge(dataDir).catch((err) => {
+      _lastFailureTime = Date.now()
+      _initPromise = null
+      throw err
+    })
   }
 
   return _initPromise
