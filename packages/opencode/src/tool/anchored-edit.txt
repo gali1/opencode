@@ -1,0 +1,80 @@
+Perform precise, multi-file edits using stable word anchors instead of fragile line numbers.
+
+## How Anchors Work
+
+Every line in a file is assigned a unique word anchor (e.g. "AppleBronze"). These anchors are STABLE — they survive insertions, deletions, and edits to other parts of the file. This means you can read a file, plan multiple edits, and apply them all at once without worrying about line numbers shifting.
+
+The anchor format is: `AnchorWord┃line content here`
+
+## Operations
+
+### read — Read files with anchors
+
+Read one or more files with stable anchor prefixes on every line. You MUST read a file with this tool before editing it, so you have the current anchors.
+
+You can read multiple files in a single call for efficiency:
+```json
+{
+  "operation": "read",
+  "files": [
+    { "path": "src/foo.ts" },
+    { "path": "src/bar.ts" }
+  ]
+}
+```
+
+### edit — Apply edits using anchors
+
+Apply precise edits by referencing anchor words. Supports three edit types:
+
+- **replace**: Replace lines from `anchor` through `end_anchor` (inclusive) with new text.
+- **insert_after**: Insert new text after the anchored line.
+- **insert_before**: Insert new text before the anchored line.
+
+Multi-file, multi-edit example:
+```json
+{
+  "operation": "edit",
+  "files": [
+    {
+      "path": "src/foo.ts",
+      "edits": [
+        {
+          "anchor": "GrapeHoney┃  return 42",
+          "end_anchor": "GrapeHoney┃  return 42",
+          "edit_type": "replace",
+          "text": "  return 43"
+        },
+        {
+          "anchor": "ElderFig┃export function foo() {",
+          "edit_type": "insert_before",
+          "text": "// Updated for v2"
+        }
+      ]
+    },
+    {
+      "path": "src/bar.ts",
+      "edits": [
+        {
+          "anchor": "MapleDawn┃const OLD_NAME = true",
+          "end_anchor": "MapleDawn┃const OLD_NAME = true",
+          "edit_type": "replace",
+          "text": "const NEW_NAME = true"
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Rules
+
+1. Always `read` a file first to get current anchors before editing.
+2. The anchor word (before ┃) is the stable identifier. The content after ┃ is verified against the file to catch stale references.
+3. For `replace`, both `anchor` and `end_anchor` are required. The anchor must refer to a line that precedes or equals the end_anchor.
+4. For `insert_after` and `insert_before`, only `anchor` is needed. `end_anchor` is ignored.
+5. The `text` field contains the NEW content (without anchor prefixes). Use actual newlines for multi-line replacements.
+6. You can batch all edits across all files into a single call. This is faster and cheaper than separate calls.
+7. After an edit, the response includes updated anchors for the changed regions. Use these for subsequent edits.
+8. Edits within a single file are applied bottom-to-top to maintain anchor stability.
+9. Do NOT include anchor prefixes in the `text` field — only the raw code content.
