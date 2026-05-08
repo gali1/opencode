@@ -125,9 +125,14 @@ function _spawnBridge(dataDir: string): Promise<void> {
       }
     })
 
-    _proc.stderr!.on("data", (chunk: Buffer) => {
-      process.stderr.write(`[mempalace] ${chunk.toString()}`)
+    _proc.stderr!.on("data", () => {
+      // Suppress bridge stderr — operational status is reported via IPC responses.
+      // Raw stderr writes corrupt the TUI layout.
     })
+
+    // _proc.stderr!.on("data", (chunk: Buffer) => {
+    //   process.stderr.write(`[mempalace] ${chunk.toString()}`)
+    // })
 
     _proc.on("error", (err) => {
       const pendingCopy = _pending.splice(0)
