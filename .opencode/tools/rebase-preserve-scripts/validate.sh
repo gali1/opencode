@@ -11,6 +11,7 @@ PROJECT_DIR="${1:-.}"
 RUN_TESTS="${2:-false}"
 RUN_BUILD="${3:-false}"
 RUN_LINT="${4:-false}"
+EXTRA_COMMANDS="${5:-}"
 
 cd "$PROJECT_DIR"
 PROJECT_DIR="$(pwd)"
@@ -24,6 +25,7 @@ echo "PROJECT_DIR: $PROJECT_DIR"
 echo "RUN_TESTS: $RUN_TESTS"
 echo "RUN_BUILD: $RUN_BUILD"
 echo "RUN_LINT: $RUN_LINT"
+echo "EXTRA_COMMANDS: ${EXTRA_COMMANDS:-none}"
 echo ""
 
 # Detect package manager — prefer bun, then pnpm, then yarn, then npm
@@ -74,6 +76,18 @@ WORKTREE_VALID=$(git rev-parse --is-inside-work-tree 2>/dev/null || echo "false"
 echo "WORKTREE_VALID: $WORKTREE_VALID"
 echo "CURRENT_BRANCH: $(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 echo "HEAD_COMMIT: $(git rev-parse HEAD 2>/dev/null)"
+
+# Git object database integrity (fsck)
+echo ""
+echo "=== GIT FSCK ==="
+FSCK_OUTPUT=$(git fsck --no-dangling 2>&1 || true)
+if echo "$FSCK_OUTPUT" | grep -qiE "error|missing|corrupt"; then
+  echo "GIT_FSCK: FAILED"
+  echo "$FSCK_OUTPUT" | head -20 | sed 's/^/  /'
+  VALIDATION_PASSED=false
+else
+  echo "GIT_FSCK: PASSED"
+fi
 echo ""
 
 # 2. Syntax Validation (language-specific)
@@ -305,7 +319,25 @@ if [ "$RUN_LINT" = "true" ]; then
   echo ""
 fi
 
-# 7. Critical file existence check
+# 7. Extra validation commands (user-specified)
+if [ -n "$EXTRA_COMMANDS" ]; then
+  echo "=== EXTRA VALIDATION COMMANDS ==="
+  IFS=',' read -ra CMDS <<< "$EXTRA_COMMANDS"
+  for cmd in "${CMDS[@]}"; do
+    cmd=$(echo "$cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -z "$cmd" ] && continue
+    echo "Running: $cmd"
+    if eval "$cmd" 2>&1 | tail -20; then
+      echo "RESULT: PASSED"
+    else
+      echo "RESULT: FAILED"
+      VALIDATION_PASSED=false
+    fi
+    echo ""
+  done
+fi
+
+# 8. Critical file existence check
 echo "=== CRITICAL FILE CHECK ==="
 CRITICAL_MISSING=0
 for f in $(git ls-files 2>/dev/null | grep -E '(package\.json|Cargo\.toml|go\.mod|setup\.py|pyproject\.toml|Makefile|Dockerfile|README)' | head -20); do

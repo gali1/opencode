@@ -169,6 +169,11 @@ case "$SYNC_METHOD" in
       echo "SYNC_RESULT: RESET_FAILED"
     fi
     ;;
+  fetch-only)
+    echo "Fetch-only mode: upstream fetched but no merge or rebase performed."
+    echo "Working tree is unchanged. Review upstream changes with inspect_upstream."
+    SYNC_SUCCESS=true
+    ;;
   *)
     echo "ERROR: Unknown sync method: $SYNC_METHOD"
     exit 1
@@ -199,14 +204,113 @@ if [ "$SYNC_SUCCESS" = "true" ]; then
   echo "SYNC_DIFF_STAT:"
   git diff --stat "$PRE_SYNC_HEAD..HEAD" 2>/dev/null | tail -1 | sed 's/^/  /' || echo "  No changes"
 
-  # Re-apply fork patches on top of synced upstream
+  # Re-integrate fork customizations — prefer git cherry-pick, fall back to patches
   echo ""
-  echo "=== RE-APPLYING FORK CUSTOMIZATIONS ==="
-  if [ -n "$BACKUP_DIR" ]; then
-    bash "$SCRIPT_DIR/apply-patches.sh" "$PROJECT_DIR" "$BACKUP_DIR" || echo "WARNING: Patch re-application had issues (check output above)"
+  echo "=== RE-INTEGRATING FORK CUSTOMIZATIONS ==="
+  REINTEGRATION_METHOD="none"
+  REINTEGRATION_APPLIED=0
+  REINTEGRATION_SKIPPED=0
+
+  # ── Strategy 1: Cherry-pick from Git backup branch (preferred) ──────────
+  GIT_BACKUP=$(resolve_git_backup "$CURRENT_BRANCH")
+
+  if [ -n "$GIT_BACKUP" ]; then
+    echo "BACKUP_SOURCE: git branch $GIT_BACKUP"
+    echo "BACKUP_PRIORITY: 1 (Git backup — highest)"
+
+    VALIDATION=$(validate_git_backup "$GIT_BACKUP")
+    echo "BACKUP_VALIDATION: $VALIDATION"
+
+    if echo "$VALIDATION" | grep -q "^VALID"; then
+      BACKUP_MERGE_BASE=$(git merge-base "$GIT_BACKUP" "$UPSTREAM_REF" 2>/dev/null || echo "")
+
+      if [ -n "$BACKUP_MERGE_BASE" ]; then
+        FORK_COMMITS=$(git log --reverse --format="%H" "$BACKUP_MERGE_BASE..$GIT_BACKUP" 2>/dev/null || true)
+        FORK_COUNT=$(echo "$FORK_COMMITS" | grep -c . 2>/dev/null || echo "0")
+
+        if [ "$FORK_COUNT" -gt 0 ]; then
+          echo "FORK_COMMITS_TO_REINTEGRATE: $FORK_COUNT"
+          echo "MERGE_BASE: ${BACKUP_MERGE_BASE:0:9}"
+          echo ""
+          echo "Cherry-picking fork commits onto rebased HEAD..."
+
+          CHERRY_PICK_FAILED_AT=""
+
+          while IFS= read -r commit; do
+            [ -z "$commit" ] && continue
+            cmsg=$(git log -1 --format="%s" "$commit" 2>/dev/null | head -c 80)
+
+            if git cherry-pick --no-edit "$commit" 2>/dev/null; then
+              REINTEGRATION_APPLIED=$((REINTEGRATION_APPLIED + 1))
+              echo "  APPLIED: ${commit:0:9} $cmsg"
+            else
+              # Check if the cherry-pick produced an empty diff (already in tree)
+              unmerged=$(git diff --name-only --diff-filter=U 2>/dev/null | wc -l | tr -d ' ')
+              if [ "$unmerged" -eq 0 ]; then
+                git cherry-pick --skip 2>/dev/null || git reset --hard HEAD 2>/dev/null
+                REINTEGRATION_SKIPPED=$((REINTEGRATION_SKIPPED + 1))
+                echo "  SKIPPED (already applied): ${commit:0:9} $cmsg"
+              else
+                # Real conflict — abort and fall back to patches
+                echo "  CONFLICT: ${commit:0:9} $cmsg"
+                git diff --name-only --diff-filter=U 2>/dev/null | sed 's/^/    /'
+                git cherry-pick --abort 2>/dev/null || true
+                CHERRY_PICK_FAILED_AT="$commit"
+                break
+              fi
+            fi
+          done <<< "$FORK_COMMITS"
+
+          echo ""
+          echo "CHERRY_PICK_APPLIED: $REINTEGRATION_APPLIED"
+          echo "CHERRY_PICK_SKIPPED: $REINTEGRATION_SKIPPED"
+
+          if [ -z "$CHERRY_PICK_FAILED_AT" ]; then
+            REINTEGRATION_METHOD="git-cherry-pick"
+            echo "REINTEGRATION_RESULT: SUCCESS"
+          else
+            echo "CHERRY_PICK_FAILED_AT: ${CHERRY_PICK_FAILED_AT:0:9}"
+            echo "Falling back to filesystem patch application..."
+          fi
+        else
+          echo "No fork-specific commits found (fork is at merge base)"
+          REINTEGRATION_METHOD="none-needed"
+        fi
+      else
+        echo "WARNING: Could not compute merge base between $GIT_BACKUP and $UPSTREAM_REF"
+      fi
+    else
+      echo "WARNING: Git backup branch $GIT_BACKUP failed validation — skipping"
+    fi
   else
-    echo "WARNING: No backup dir — skipping patch re-application"
+    echo "No Git backup branch found for branch $CURRENT_BRANCH"
   fi
+
+  # ── Strategy 2: Filesystem patch application (fallback) ─────────────────
+  if [ "$REINTEGRATION_METHOD" = "none" ] && [ -n "$BACKUP_DIR" ]; then
+    echo ""
+    echo "BACKUP_SOURCE: filesystem $BACKUP_DIR"
+    echo "BACKUP_PRIORITY: 2 (Local backup — fallback)"
+    if [ -z "$GIT_BACKUP" ]; then
+      echo "FALLBACK_REASON: No git backup branch found"
+    else
+      echo "FALLBACK_REASON: Git cherry-pick encountered conflicts"
+    fi
+    echo ""
+    bash "$SCRIPT_DIR/apply-patches.sh" "$PROJECT_DIR" "$BACKUP_DIR" || echo "WARNING: Patch re-application had issues"
+    REINTEGRATION_METHOD="fs-patches"
+  fi
+
+  # ── No backup available ─────────────────────────────────────────────────
+  if [ "$REINTEGRATION_METHOD" = "none" ]; then
+    echo ""
+    echo "ERROR: No backup source available for re-integration"
+    echo "  Priority 1 — Git backup branch: $([ -z "$GIT_BACKUP" ] && echo "not found" || echo "failed validation/cherry-pick")"
+    echo "  Priority 2 — Filesystem backup: $([ -z "$BACKUP_DIR" ] && echo "not found" || echo "no patches")"
+  fi
+
+  echo ""
+  echo "REINTEGRATION_METHOD: $REINTEGRATION_METHOD"
 
   # Final verification
   echo ""
@@ -237,4 +341,15 @@ fi
 echo ""
 echo "PRE_SYNC_TAG: $PRE_SYNC_TAG (use for rollback: git reset --hard $PRE_SYNC_TAG)"
 echo ""
+
+# Persist audit log entry
+_rp_log "sync_$(basename "$PROJECT_DIR")" "SYNC_METHOD: $SYNC_METHOD
+UPSTREAM_REF: $UPSTREAM_REF
+PRE_SYNC_HEAD: $PRE_SYNC_HEAD
+POST_SYNC_HEAD: $(git rev-parse HEAD 2>/dev/null || echo UNKNOWN)
+REINTEGRATION_METHOD: ${REINTEGRATION_METHOD:-N/A}
+REINTEGRATION_APPLIED: ${REINTEGRATION_APPLIED:-0}
+REINTEGRATION_SKIPPED: ${REINTEGRATION_SKIPPED:-0}
+PRE_SYNC_TAG: $PRE_SYNC_TAG"
+
 echo "=== SYNCHRONIZATION COMPLETE ==="

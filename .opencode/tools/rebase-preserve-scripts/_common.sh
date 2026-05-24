@@ -149,3 +149,107 @@ require_git_repo() {
     exit 1
   fi
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Git backup branch support
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Find the most recent valid git backup branch for a given branch.
+# Backup branches follow the pattern: {branch}-backup-{YYYYMMDD_HHMMSS}
+# Returns the branch name, or empty string if none found.
+resolve_git_backup() {
+  local current_branch="${1:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null)}"
+  local pattern="${current_branch}-backup-*"
+
+  # List matching branches sorted by committer date (newest first)
+  local latest
+  latest=$(git for-each-ref --sort=-creatordate --format='%(refname:short)' "refs/heads/$pattern" 2>/dev/null | head -1)
+
+  if [ -n "$latest" ] && git rev-parse --verify "$latest" >/dev/null 2>&1; then
+    echo "$latest"
+    return
+  fi
+
+  echo ""
+}
+
+# Validate a git backup branch is intact and usable for recovery.
+# Returns 0 (valid) or 1 (invalid), prints status to stdout.
+validate_git_backup() {
+  local branch="$1"
+
+  if ! git rev-parse --verify "$branch" >/dev/null 2>&1; then
+    echo "INVALID: Branch $branch does not exist"
+    return 1
+  fi
+
+  local commit
+  commit=$(git rev-parse "$branch" 2>/dev/null)
+
+  if ! git cat-file -t "$commit" >/dev/null 2>&1; then
+    echo "INVALID: Commit $commit is corrupted or unreachable"
+    return 1
+  fi
+
+  # Verify the commit tree is readable (catches shallow/partial clones)
+  if ! git ls-tree --name-only "$commit" >/dev/null 2>&1; then
+    echo "INVALID: Tree for $commit is unreadable"
+    return 1
+  fi
+
+  echo "VALID: $branch -> ${commit:0:9}"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent audit logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Directory for persistent audit logs (survives across sessions).
+_rp_log_dir() {
+  echo "${REBASE_PRESERVE_LOG_DIR:-$HOME/.opencode/rebase-preserve-logs}"
+}
+
+# Append a timestamped entry to the audit log for a given backup/session ID.
+# Usage: _rp_log <id> <content>
+_rp_log() {
+  local id="${1:-session}"
+  local content="$2"
+  local log_dir
+  log_dir="$(_rp_log_dir)"
+  mkdir -p "$log_dir" 2>/dev/null || return 0
+  printf '\n[%s]\n%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$content" \
+    >> "$log_dir/${id}.log" 2>/dev/null || true
+}
+
+# Validate a filesystem backup directory is intact and usable.
+# Returns 0 (valid) or 1 (invalid), prints status to stdout.
+validate_fs_backup() {
+  local backup_dir="$1"
+
+  if [ ! -d "$backup_dir" ]; then
+    echo "INVALID: Directory does not exist"
+    return 1
+  fi
+
+  if [ ! -d "$backup_dir/project" ]; then
+    echo "INVALID: No project/ subdirectory"
+    return 1
+  fi
+
+  if [ ! -f "$backup_dir/.backup-metadata.json" ]; then
+    echo "INVALID: No .backup-metadata.json"
+    return 1
+  fi
+
+  # Check the backup actually contains files
+  local has_files
+  has_files=$(find "$backup_dir/project" -type f -print -quit 2>/dev/null)
+  if [ -z "$has_files" ]; then
+    echo "INVALID: Backup contains no files"
+    return 1
+  fi
+
+  echo "VALID: $backup_dir"
+  return 0
+}

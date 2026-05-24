@@ -14,6 +14,46 @@ PROJECT_NAME="$(basename "$PROJECT_DIR")"
 echo "=== AVAILABLE BACKUPS ==="
 echo ""
 
+# ── Git backup branches (highest priority) ────────────────────────────────
+echo "=== GIT BACKUP BRANCHES ==="
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+GIT_BACKUPS=$(git for-each-ref --sort=-creatordate --format='%(refname:short) %(creatordate:iso) %(objectname:short)' "refs/heads/*-backup-*" 2>/dev/null || true)
+GIT_COUNT=0
+if [ -n "$GIT_BACKUPS" ]; then
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    gb_name=$(echo "$line" | awk '{print $1}')
+    gb_date=$(echo "$line" | awk '{print $2, $3}')
+    gb_commit=$(echo "$line" | awk '{print $NF}')
+    GIT_COUNT=$((GIT_COUNT + 1))
+    echo "--- GIT BACKUP $GIT_COUNT ---"
+    echo "BRANCH: $gb_name"
+    echo "COMMIT: $gb_commit"
+    echo "DATE: $gb_date"
+    echo "MESSAGE: $(git log -1 --format='%s' "$gb_name" 2>/dev/null | head -c 100)"
+    # Show fork commit count relative to upstream
+    for remote in upstream origin; do
+      ub=$(detect_upstream_branch "$remote" 2>/dev/null)
+      if [ -n "$ub" ]; then
+        mb=$(git merge-base "$gb_name" "$remote/$ub" 2>/dev/null || true)
+        if [ -n "$mb" ]; then
+          fc=$(git rev-list --count "$mb..$gb_name" 2>/dev/null || echo "?")
+          echo "FORK_COMMITS: $fc (vs $remote/$ub)"
+        fi
+        break
+      fi
+    done
+    echo "VALIDATION: $(validate_git_backup "$gb_name" 2>/dev/null)"
+    echo ""
+  done <<< "$GIT_BACKUPS"
+else
+  echo "No git backup branches found"
+  echo ""
+fi
+
+echo "=== FILESYSTEM BACKUPS ==="
+echo ""
+
 # Collect all known backup locations via shared helper
 SEARCH_DIRS=()
 while IFS= read -r dir; do
@@ -90,6 +130,12 @@ if [ "$COUNT" -eq 0 ]; then
   echo "Run the backup tool first to create one."
 fi
 
-echo "TOTAL_BACKUPS: $COUNT"
+echo "TOTAL_GIT_BACKUPS: $GIT_COUNT"
+echo "TOTAL_FS_BACKUPS: $COUNT"
+echo "TOTAL_BACKUPS: $((GIT_COUNT + COUNT))"
+echo ""
+echo "BACKUP_PRIORITY_ORDER:"
+echo "  1. Git backup branches (cherry-pick recovery)"
+echo "  2. Filesystem backups (patch-based recovery)"
 echo ""
 echo "=== LIST COMPLETE ==="

@@ -195,9 +195,35 @@ $BACKUP_DIR
 BREADCRUMB_EOF
 echo "BREADCRUMB_WRITTEN: $PROJECT_DIR/.opencode/.last-backup-location"
 
+# Create Git backup branch — preserves full commit history for cherry-pick recovery
+echo ""
+echo "=== CREATING GIT BACKUP BRANCH ==="
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "DETACHED")
+GIT_BACKUP_BRANCH=""
+GIT_BACKUP_COMMIT=""
+if [ "$CURRENT_BRANCH" != "DETACHED" ] && [ "$CURRENT_BRANCH" != "HEAD" ]; then
+  GIT_BACKUP_BRANCH="${CURRENT_BRANCH}-backup-${TIMESTAMP}"
+  GIT_BACKUP_COMMIT=$(git rev-parse HEAD 2>/dev/null)
+  if git branch "$GIT_BACKUP_BRANCH" HEAD 2>/dev/null; then
+    echo "GIT_BACKUP_BRANCH: $GIT_BACKUP_BRANCH"
+    echo "GIT_BACKUP_COMMIT: $GIT_BACKUP_COMMIT"
+    echo "GIT_BACKUP_SOURCE: $CURRENT_BRANCH"
+  else
+    echo "WARNING: Could not create git backup branch (non-fatal)"
+    GIT_BACKUP_BRANCH=""
+  fi
+else
+  echo "WARNING: Detached HEAD — skipping git backup branch creation"
+fi
+
 echo ""
 echo "BACKUP_COMPLETE: true"
 echo "BACKUP_ID: $BACKUP_ID"
 echo "BACKUP_DIR: $BACKUP_DIR"
+if [ -n "$GIT_BACKUP_BRANCH" ]; then
+  echo "GIT_BACKUP_BRANCH: $GIT_BACKUP_BRANCH"
+  echo "GIT_BACKUP_COMMIT: $GIT_BACKUP_COMMIT"
+fi
+echo "BACKUP_TYPES: filesystem$([ -n "$GIT_BACKUP_BRANCH" ] && echo ", git-branch")"
 echo ""
 echo "=== BACKUP CREATION COMPLETE ==="
