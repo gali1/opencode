@@ -3,6 +3,8 @@ import * as fs from "fs/promises"
 import * as path from "path"
 import * as Tool from "./tool"
 import { InstanceState } from "@/effect/instance-state"
+import { LSP } from "@/lsp/lsp"
+import { AppFileSystem } from "@opencode-ai/core/filesystem"
 
 import {
     reconcileAnchors,
@@ -223,9 +225,16 @@ function handleRead(
 
 // ─── Tool definition ─────────────────────────────────────────────────────
 
+// ─── Self-validation gate (DEL #9/#10) ──────────────────────────────────
+// Count error-level (severity 1) diagnostics for a file.
+function countErrors(diagnostics: Record<string, { severity?: number }[]>, normalizedPath: string): number {
+    return (diagnostics[normalizedPath] ?? []).filter((d) => d.severity === 1).length
+}
+
 export const AnchoredEditTool = Tool.define(
     "anchored_edit",
     Effect.gen(function* () {
+        const lsp = yield* LSP.Service
         return {
             description: DESCRIPTION,
             parameters: Parameters,
@@ -297,12 +306,48 @@ export const AnchoredEditTool = Tool.define(
                         const { finalLines, applied } = applyEdits(lines, resolved)
                         const finalContent = finalLines.join("\n")
 
+                        // ── Self-validation gate (DEL #9/#10) ──
+                        // Capture the pre-edit error baseline so we only react to
+                        // errors this edit introduces, not pre-existing ones.
+                        const normalizedPath = AppFileSystem.normalizePath(absolutePath)
+                        const hasLsp = yield* lsp.hasClients(absolutePath)
+                        let baselineErrors = 0
+                        if (hasLsp) {
+                            yield* lsp.touchFile(absolutePath, "document").pipe(Effect.ignore)
+                            baselineErrors = countErrors(yield* lsp.diagnostics(), normalizedPath)
+                        }
+
                         // Write file
                         try {
                             yield* Effect.promise(() => fs.writeFile(absolutePath, finalContent, "utf8"))
                         } catch (err) {
                             results.push(`Error writing ${displayPath}: ${err}`)
                             continue
+                        }
+
+                        // Validate post-write. If the edit introduced new error-level
+                        // diagnostics, roll the file back to its original content so no
+                        // change ever leaves the file in a broken syntactic state.
+                        let validationNote = ""
+                        if (hasLsp) {
+                            yield* lsp.touchFile(absolutePath, "document").pipe(Effect.ignore)
+                            const postDiag = yield* lsp.diagnostics()
+                            const newErrors = countErrors(postDiag, normalizedPath) - baselineErrors
+                            if (newErrors > 0) {
+                                yield* Effect.promise(() => fs.writeFile(absolutePath, content, "utf8"))
+                                reconcileAnchors(absolutePath, lines, ctx.sessionID)
+                                totalFailed += resolved.length
+                                const block = LSP.Diagnostic.report(absolutePath, postDiag[normalizedPath] ?? [])
+                                results.push(
+                                    [
+                                        `*** ${displayPath} — ROLLED BACK: ${resolved.length} edit(s) introduced ${newErrors} new error(s). File restored to original.`,
+                                        "Fix the edit and retry. Diagnostics:",
+                                        block,
+                                    ].join("\n"),
+                                )
+                                continue
+                            }
+                            validationNote = " [validated]"
                         }
 
                         // Reconcile new anchors after write
@@ -339,7 +384,7 @@ export const AnchoredEditTool = Tool.define(
 
                         results.push(
                             [
-                                `*** ${displayPath} — ${resolved.length} edit(s) applied (+${fileAdded}, -${fileRemoved} lines)${failed.length > 0 ? `, ${failed.length} failed` : ""}`,
+                                `*** ${displayPath} — ${resolved.length} edit(s) applied (+${fileAdded}, -${fileRemoved} lines)${failed.length > 0 ? `, ${failed.length} failed` : ""}${validationNote}`,
                                 "",
                                 diff,
                                 "",

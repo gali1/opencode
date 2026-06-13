@@ -78,3 +78,14 @@ Multi-file, multi-edit example:
 7. After an edit, the response includes updated anchors for the changed regions. Use these for subsequent edits.
 8. Edits within a single file are applied bottom-to-top to maintain anchor stability.
 9. Do NOT include anchor prefixes in the `text` field — only the raw code content.
+
+## Self-validation & auto-rollback
+
+When a language server is available for a file, each edit is validated after it
+is written. If the edit introduces NEW error-level diagnostics (syntax/type
+errors that did not exist before), the file is automatically rolled back to its
+original content and the result is marked `ROLLED BACK` with the diagnostics.
+Pre-existing errors are ignored — only errors your edit introduces trigger a
+rollback. A successful, validated edit is marked `[validated]`. This guarantees
+edits never leave a file in a broken syntactic state; if you see a rollback,
+fix the `text` and retry.
