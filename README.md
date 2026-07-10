@@ -152,6 +152,17 @@ exec bun run /home/$USER/opencode/packages/opencode/src/index.ts "$@"' \
   | sudo tee /usr/local/bin/opencode > /dev/null
 sudo chmod +x /usr/local/bin/opencode
 ```
+In case the above approach do not work try the commands below instead:
+
+```bash
+sudo tee /usr/local/bin/opencode > /dev/null <<'EOF'
+#!/bin/sh
+cd /home/bro/opencode || exit 1
+exec bun run --cwd packages/opencode --conditions=browser src/index.ts "$@"
+EOF
+
+sudo chmod +x /usr/local/bin/opencode
+```
 
 #### Verify
 
