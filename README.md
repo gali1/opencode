@@ -157,7 +157,7 @@ In case the above approach do not work try the commands below instead:
 ```bash
 sudo tee /usr/local/bin/opencode > /dev/null <<'EOF'
 #!/bin/sh
-cd /home/bro/opencode || exit 1
+cd /home/$USER/opencode || exit 1
 exec bun run --cwd packages/opencode --conditions=browser src/index.ts "$@"
 EOF
 
