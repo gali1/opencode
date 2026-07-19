@@ -60,6 +60,19 @@ export const AuthMethodID = "opencode-login"
 function normalizeCwd(cwd: string): string {
   const home = os.homedir()
   if (!cwd) return home
+
+  // Convert WSL UNC paths (\\wsl.localhost\<distro>\<path>) to POSIX (/<path>)
+  // so they resolve correctly inside WSL instead of falling back to $HOME.
+  const wslUnc = /^\\\\wsl\.localhost\\([^\\]+)\\(.+)$/
+  const wslMatch = cwd.match(wslUnc)
+  if (wslMatch) {
+    const posix = "/" + wslMatch[2].replaceAll("\\", "/")
+    try {
+      if (fs.statSync(posix).isDirectory()) return posix
+    } catch {}
+    return home
+  }
+
   const looksWindows = /^[A-Za-z]:[\\/]/.test(cwd) || cwd.includes("\\")
   if (looksWindows) {
     try {
