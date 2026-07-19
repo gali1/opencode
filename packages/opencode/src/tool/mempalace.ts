@@ -7,13 +7,20 @@ import * as Tool from "./tool"
 import { InstanceState } from "@/effect/instance-state"
 import DESCRIPTION from "./mempalace.txt"
 
-// ─── Resolve bridge script path relative to this module ─────────────────
-// import.meta.dir is Bun-native; the URL fallback covers Node ESM.
-const MODULE_DIR: string =
-  (import.meta as any).dir ??
-  path.dirname(new URL(import.meta.url).pathname)
-
-const BRIDGE_SCRIPT = path.join(MODULE_DIR, "mempalace_bridge.py")
+// ─── Resolve bridge script path ─────────────────────────────────────────
+// In a compiled binary, look next to the executable first; fall back to
+// the source tree (dev mode with `bun run`).
+import { fileURLToPath } from "url"
+const BINARY_DIR: string = path.dirname(process.execPath)
+const BRIDGE_SCRIPT: string = (() => {
+  const beside = path.join(BINARY_DIR, "mempalace_bridge.py")
+  const { existsSync } = require("fs") as typeof import("fs")
+  if (existsSync(beside)) return beside
+  const modDir: string =
+    (import.meta as any).dir ??
+    path.dirname(fileURLToPath(import.meta.url))
+  return path.join(modDir, "mempalace_bridge.py")
+})()
 
 // ─── Parameter schema ────────────────────────────────────────────────────
 export const Parameters = Schema.Struct({
@@ -92,8 +99,6 @@ let _buffer = ""
 let _pending: Array<{ resolve: (line: string) => void; reject: (err: Error) => void }> = []
 let _initPromise: Promise<void> | null = null
 let _currentDataDir = ""
-let _lastFailureTime = 0
-const _FAILURE_COOLDOWN_MS = 120_000
 
 function _spawnBridge(dataDir: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -202,10 +207,6 @@ function ensureBridge(dataDir: string): Promise<void> {
     return Promise.resolve()
   }
 
-  if (_lastFailureTime > 0 && Date.now() - _lastFailureTime < _FAILURE_COOLDOWN_MS) {
-    return Promise.reject(new Error("mempalace bridge unavailable (cooldown)"))
-  }
-
   if (_proc && _proc.exitCode === null && _currentDataDir !== dataDir) {
     _proc.kill("SIGTERM")
     _proc = null
@@ -214,7 +215,6 @@ function ensureBridge(dataDir: string): Promise<void> {
 
   if (!_initPromise) {
     _initPromise = _spawnBridge(dataDir).catch((err) => {
-      _lastFailureTime = Date.now()
       _initPromise = null
       throw err
     })

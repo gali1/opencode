@@ -1,6 +1,6 @@
 import path from "path"
 import { Effect, Context, Layer, Scope } from "effect"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Global } from "@opencode-ai/core/global"
 import { Config } from "@/config/config"
 import { ConfigReference } from "@/config/reference"
@@ -83,11 +83,11 @@ function branchLabel(branch: string | undefined) {
 
 function normalizedTarget(target?: string) {
   if (!target) return
-  return process.platform === "win32" ? AppFileSystem.normalizePath(target) : target
+  return process.platform === "win32" ? FileSystem.normalizePath(target) : target
 }
 
 function containsReferencePath(referencePath: string, target: string) {
-  return AppFileSystem.contains(normalizedTarget(referencePath) ?? referencePath, target)
+  return FileSystem.contains(normalizedTarget(referencePath) ?? referencePath, target)
 }
 
 function uniqueGitReferences(references: Resolved[]) {

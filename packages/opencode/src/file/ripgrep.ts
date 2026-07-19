@@ -1,6 +1,6 @@
 import path from "path"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Cause, Context, Effect, Fiber, Layer, Queue, Schema, Stream } from "effect"
 import type { PlatformError } from "effect/PlatformError"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
@@ -224,11 +224,11 @@ function raceAbort<A, E, R>(effect: Effect.Effect<A, E, R>, signal?: AbortSignal
   return signal ? effect.pipe(Effect.raceFirst(waitForAbort(signal))) : effect
 }
 
-export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildProcessSpawner | HttpClient.HttpClient> =
+export const layer: Layer.Layer<Service, never, FileSystem.Service | ChildProcessSpawner | HttpClient.HttpClient> =
   Layer.effect(
     Service,
     Effect.gen(function* () {
-      const fs = yield* AppFileSystem.Service
+      const fs = yield* FileSystem.Service
       const http = HttpClient.filterStatusOk(yield* HttpClient.HttpClient)
       const spawner = yield* ChildProcessSpawner
 
@@ -477,7 +477,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
 
 export const defaultLayer = layer.pipe(
   Layer.provide(FetchHttpClient.layer),
-  Layer.provide(AppFileSystem.defaultLayer),
+  Layer.provide(FileSystem.defaultLayer),
   Layer.provide(CrossSpawnSpawner.defaultLayer),
 )
 

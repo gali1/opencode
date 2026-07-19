@@ -2,7 +2,7 @@ import { BusEvent } from "@/bus/bus-event"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { InstanceState } from "@/effect/instance-state"
 
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Git } from "@/git"
 import { Effect, Layer, Context, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
@@ -332,7 +332,7 @@ export const use = serviceUse(Service)
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const appFs = yield* AppFileSystem.Service
+    const appFs = yield* FileSystem.Service
     const rg = yield* Ripgrep.Service
     const git = yield* Git.Service
     const scope = yield* Scope.Scope
@@ -528,7 +528,7 @@ export const layer = Layer.effect(
       const exists = yield* appFs.existsSafe(full)
       if (!exists) return { type: "text" as const, content: "" }
 
-      const mimeType = AppFileSystem.mimeType(full)
+      const mimeType = FileSystem.mimeType(full)
       const encode = knownText ? false : shouldEncode(mimeType)
 
       if (encode && !isImage(mimeType)) return { type: "binary" as const, content: "", mimeType }
@@ -647,7 +647,7 @@ export const layer = Layer.effect(
 
 export const defaultLayer = layer.pipe(
   Layer.provide(Ripgrep.defaultLayer),
-  Layer.provide(AppFileSystem.defaultLayer),
+  Layer.provide(FileSystem.defaultLayer),
   Layer.provide(Git.defaultLayer),
 )
 

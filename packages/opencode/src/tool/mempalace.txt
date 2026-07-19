@@ -1,3 +1,5 @@
+SINGLE TOOL called "mempalace". Do NOT call operations below as separate tools — always call mempalace with the "operation" parameter set to the desired operation name.
+
 Persistent AI memory system. You have two memory layers: the conversation prompt (short-term) and mempalace (long-term). Use them together to minimize token usage while maintaining full recall.
 
 ## HYBRID MEMORY PROTOCOL — Follow This Every Session
@@ -81,7 +83,7 @@ Before the session ends:
 ## Storing Rules
 
 ### ALWAYS search before storing
-1. memory_search(query="<topic>", limit=5)
+1. mempalace operation=memory_search query="<topic>" limit=5
 2. Duplicate exists → skip
 3. Same topic, outdated → memory_supersede(old_id, content)
 4. No match → memory_store(content, memory_type, tags)

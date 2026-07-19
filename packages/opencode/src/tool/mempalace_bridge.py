@@ -35,10 +35,16 @@ _search_memories = None
 try:
     from mempalace import mcp_server as _mcp_mod
     from mempalace.searcher import search_memories as _search_memories_fn
-    _kg = _mcp_mod._kg
-    _config = _mcp_mod._config
+    # mempalace 3.6.x: _kg/_config are module-level singletons or classes
+    _kg = getattr(_mcp_mod, "_kg", None) or getattr(_mcp_mod, "KnowledgeGraph", None)
+    _config = getattr(_mcp_mod, "_config", None) or getattr(_mcp_mod, "MempalaceConfig", None)
+    if callable(_config) and not isinstance(_config, dict):
+        try:
+            _config = _config()
+        except Exception:
+            pass
     _search_memories = _search_memories_fn
-except ImportError as e:
+except Exception as e:
     _IMPORT_ERROR = str(e)
 
 # ── Rekal engine ─────────────────────────────────────────────────────────
@@ -57,7 +63,9 @@ if _IMPORT_ERROR is None:
         _spec.loader.exec_module(_engine_mod)
         _RekalEngine = _engine_mod.RekalEngine
 
-        palace_path = _config.palace_path if _config else data_dir
+        if _config and hasattr(_config, 'palace_path') and not _config.palace_path:
+            _config.palace_path = data_dir
+        palace_path = (_config.palace_path if _config else data_dir) or data_dir
         _ENGINE = _RekalEngine(
             data_dir=data_dir,
             palace_path=palace_path,

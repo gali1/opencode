@@ -1,6 +1,6 @@
 import path from "path"
 import { Context, Effect, Layer, Schema } from "effect"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Git } from "@/git"
 import {
@@ -14,6 +14,7 @@ import {
   UnsupportedLocalRepositoryError,
   type RemoteReference,
 } from "@/util/repository"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 
 export type Result = {
   repository: string
@@ -168,7 +169,7 @@ export const validateBranch = Effect.fn("RepositoryCache.validateBranch")(functi
 const ensureWithServices = Effect.fn("RepositoryCache.ensureWithServices")(function* (
   input: EnsureInput,
   services: {
-    fs: AppFileSystem.Interface
+    fs: FileSystem.Interface
     git: Git.Interface
   },
 ) {
@@ -298,10 +299,10 @@ const ensureWithServices = Effect.fn("RepositoryCache.ensureWithServices")(funct
   )
 })
 
-export const layer: Layer.Layer<Service, never, AppFileSystem.Service | Git.Service> = Layer.effect(
+export const layer: Layer.Layer<Service, never, FileSystem.Service | Git.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const fs = yield* AppFileSystem.Service
+    const fs = yield* FileSystem.Service
     const git = yield* Git.Service
 
     return Service.of({
@@ -313,8 +314,14 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | Git.Serv
 )
 
 export const defaultLayer: Layer.Layer<Service> = layer.pipe(
-  Layer.provide(AppFileSystem.defaultLayer),
-  Layer.provide(Git.defaultLayer),
+  Layer.provide(FileSystem.node),
+  Layer.provide(Git.node),
 )
+
+export const node = LayerNode.make({
+  service: Service,
+  layer,
+  deps: [FileSystem.node, Git.node],
+})
 
 export * as RepositoryCache from "./repository-cache"
