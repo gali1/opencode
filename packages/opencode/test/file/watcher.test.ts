@@ -1,7 +1,7 @@
 import { describe, expect } from "bun:test"
 import path from "path"
 import { realpath } from "fs/promises"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FileSystem } from "@opencode-ai/core/filesystem"
 import { ConfigProvider, Deferred, Duration, Effect, Layer, Option } from "effect"
 import { TestInstance, provideInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -30,7 +30,7 @@ const watcherLayer = FileWatcher.layer.pipe(
   Layer.provide(watcherConfigLayer),
 )
 
-const it = testEffect(Layer.mergeAll(AppFileSystem.defaultLayer, Git.defaultLayer))
+const it = testEffect(Layer.mergeAll(FileSystem.defaultLayer, Git.defaultLayer))
 
 type WatcherEvent = { file: string; event: "add" | "change" | "unlink" }
 
@@ -149,7 +149,7 @@ function ready(directory: string) {
   const head = path.join(directory, ".git", "HEAD")
 
   return Effect.gen(function* () {
-    const fs = yield* AppFileSystem.Service
+    const fs = yield* FileSystem.Service
     const git = yield* Git.Service
 
     yield* eventuallyUpdate(
@@ -185,7 +185,7 @@ describeWatcher("FileWatcher", () => {
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         const file = path.join(test.directory, "watch.txt")
         const cases = [
           { event: "add" as const, trigger: fs.writeFileString(file, "a") },
@@ -208,7 +208,7 @@ describeWatcher("FileWatcher", () => {
   it.instance("watches non-git roots", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
-      const fs = yield* AppFileSystem.Service
+      const fs = yield* FileSystem.Service
       const file = path.join(test.directory, "plain.txt")
 
       yield* withWatcher(
@@ -225,7 +225,7 @@ describeWatcher("FileWatcher", () => {
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         const file = path.join(test.directory, "after-dispose.txt")
 
         // Start and immediately stop the watcher (withWatcher disposes on exit).
@@ -244,7 +244,7 @@ describeWatcher("FileWatcher", () => {
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         const git = yield* Git.Service
         const gitIndex = path.join(test.directory, ".git", "index")
         const edit = path.join(test.directory, "tracked.txt")
@@ -266,7 +266,7 @@ describeWatcher("FileWatcher", () => {
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         const git = yield* Git.Service
         const head = path.join(test.directory, ".git", "HEAD")
         const branch = `watch-${Math.random().toString(36).slice(2)}`
@@ -300,7 +300,7 @@ describeWatcher("FileWatcher", () => {
       () =>
         Effect.gen(function* () {
           const test = yield* TestInstance
-          const fs = yield* AppFileSystem.Service
+          const fs = yield* FileSystem.Service
           const git = yield* Git.Service
           const dir = test.directory
           const actualGit = path.join(dir, "..", "tmp_actual_git_" + Math.random().toString(36).slice(2))

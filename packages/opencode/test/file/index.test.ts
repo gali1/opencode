@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FileSystem } from "@opencode-ai/core/filesystem"
 import { $ } from "bun"
 import { Cause, Effect, Exit, Layer } from "effect"
 import path from "path"
@@ -12,7 +12,7 @@ afterEach(async () => {
   await disposeAllInstances()
 })
 
-const it = testEffect(Layer.mergeAll(File.defaultLayer, AppFileSystem.defaultLayer))
+const it = testEffect(Layer.mergeAll(File.defaultLayer, FileSystem.defaultLayer))
 
 const init = Effect.fn("FileTest.init")(function* () {
   const file = yield* File.Service
@@ -59,7 +59,7 @@ const failureMessage = <A, E, R>(self: Effect.Effect<A, E, R>) =>
   })
 
 const setupSearchableRepo = Effect.fn("FileTest.setupSearchableRepo")(function* (directory: string) {
-  const fsys = yield* AppFileSystem.Service
+  const fsys = yield* FileSystem.Service
   yield* fsys.writeWithDirs(path.join(directory, "index.ts"), "code")
   yield* fsys.writeWithDirs(path.join(directory, "utils.ts"), "utils")
   yield* fsys.writeWithDirs(path.join(directory, "readme.md"), "readme")
@@ -160,7 +160,7 @@ describe("file/index Filesystem patterns", () => {
         const filepath = path.join(test.directory, "test.json")
         yield* Effect.promise(() => fs.writeFile(filepath, '{"key": "value"}', "utf-8"))
 
-        expect(AppFileSystem.mimeType(filepath)).toContain("application/json")
+        expect(FileSystem.mimeType(filepath)).toContain("application/json")
 
         const result = yield* read("test.json")
         expect(result.type).toBe("text")
@@ -180,7 +180,7 @@ describe("file/index Filesystem patterns", () => {
         for (const testCase of testCases) {
           const filepath = path.join(test.directory, `test.${testCase.ext}`)
           yield* Effect.promise(() => fs.writeFile(filepath, Buffer.from([0x00, 0x00, 0x00, 0x00])))
-          expect(AppFileSystem.mimeType(filepath)).toContain(testCase.mime)
+          expect(FileSystem.mimeType(filepath)).toContain(testCase.mime)
         }
       }),
     )
@@ -188,10 +188,10 @@ describe("file/index Filesystem patterns", () => {
 
   describe("list() - Filesystem.exists() and readText()", () => {
     it.instance(
-      "reads .gitignore via AppFileSystem.existsSafe() and readFileString()",
+      "reads .gitignore via FileSystem.existsSafe() and readFileString()",
       () =>
         Effect.gen(function* () {
-          const fsys = yield* AppFileSystem.Service
+          const fsys = yield* FileSystem.Service
           const test = yield* TestInstance
           const gitignorePath = path.join(test.directory, ".gitignore")
           yield* fsys.writeFileString(gitignorePath, "node_modules\ndist\n")
@@ -206,7 +206,7 @@ describe("file/index Filesystem patterns", () => {
       "reads .ignore file similarly",
       () =>
         Effect.gen(function* () {
-          const fsys = yield* AppFileSystem.Service
+          const fsys = yield* FileSystem.Service
           const test = yield* TestInstance
           const ignorePath = path.join(test.directory, ".ignore")
           yield* fsys.writeFileString(ignorePath, "*.log\n.env\n")
@@ -221,7 +221,7 @@ describe("file/index Filesystem patterns", () => {
       "handles missing .gitignore gracefully",
       () =>
         Effect.gen(function* () {
-          const fsys = yield* AppFileSystem.Service
+          const fsys = yield* FileSystem.Service
           const test = yield* TestInstance
           const gitignorePath = path.join(test.directory, ".gitignore")
           expect(yield* fsys.existsSafe(gitignorePath)).toBe(false)
@@ -233,12 +233,12 @@ describe("file/index Filesystem patterns", () => {
     )
   })
 
-  describe("File.changed() - AppFileSystem.readFileString() for untracked files", () => {
+  describe("File.changed() - FileSystem.readFileString() for untracked files", () => {
     it.instance(
-      "reads untracked files via AppFileSystem.readFileString()",
+      "reads untracked files via FileSystem.readFileString()",
       () =>
         Effect.gen(function* () {
-          const fsys = yield* AppFileSystem.Service
+          const fsys = yield* FileSystem.Service
           const test = yield* TestInstance
           const untrackedPath = path.join(test.directory, "untracked.txt")
           yield* fsys.writeFileString(untrackedPath, "new content\nwith multiple lines")
@@ -251,9 +251,9 @@ describe("file/index Filesystem patterns", () => {
   })
 
   describe("Error handling", () => {
-    it.instance("handles errors gracefully in AppFileSystem.readFileString()", () =>
+    it.instance("handles errors gracefully in FileSystem.readFileString()", () =>
       Effect.gen(function* () {
-        const fsys = yield* AppFileSystem.Service
+        const fsys = yield* FileSystem.Service
         const test = yield* TestInstance
         yield* fsys.writeFileString(path.join(test.directory, "readonly.txt"), "content")
 
@@ -265,9 +265,9 @@ describe("file/index Filesystem patterns", () => {
       }),
     )
 
-    it.instance("handles errors in AppFileSystem.readFile()", () =>
+    it.instance("handles errors in FileSystem.readFile()", () =>
       Effect.gen(function* () {
-        const fsys = yield* AppFileSystem.Service
+        const fsys = yield* FileSystem.Service
         const test = yield* TestInstance
         const nonExistentPath = path.join(test.directory, "does-not-exist.bin")
         const buffer = yield* fsys.readFile(nonExistentPath).pipe(Effect.orElseSucceed(() => new Uint8Array(0)))

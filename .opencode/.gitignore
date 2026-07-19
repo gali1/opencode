@@ -5,4 +5,3 @@ bun.lock
 .gitignore
 package-lock.json
 references/
-.last-backup-location

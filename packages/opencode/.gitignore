@@ -6,4 +6,3 @@ app.log
 script/build-*.ts
 temporary-*.md
 .artifacts
-__pycache__

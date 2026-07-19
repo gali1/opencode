@@ -2,7 +2,7 @@ import { afterEach, describe, expect } from "bun:test"
 import path from "path"
 import { pathToFileURL } from "node:url"
 import { Cause, Effect, Exit, Layer } from "effect"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Git } from "../../src/git"
@@ -32,7 +32,7 @@ const ctx = {
 const it = testEffect(
   Layer.mergeAll(
     Agent.defaultLayer,
-    AppFileSystem.defaultLayer,
+    FileSystem.defaultLayer,
     CrossSpawnSpawner.defaultLayer,
     Git.defaultLayer,
     RepositoryCache.defaultLayer,
@@ -83,7 +83,7 @@ describe("tool.repo_clone", () => {
   it.live("clones a repo into the managed cache and reuses it on subsequent calls", () =>
     provideTmpdirInstance((_dir) =>
       Effect.gen(function* () {
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         const source = yield* tmpdirScoped({ git: true })
         const remoteRoot = yield* tmpdirScoped()
         const remoteDir = path.join(remoteRoot, "owner")
@@ -113,7 +113,7 @@ describe("tool.repo_clone", () => {
   it.live("refresh updates an existing cached clone", () =>
     provideTmpdirInstance((_dir) =>
       Effect.gen(function* () {
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         const source = yield* tmpdirScoped({ git: true })
         const remoteRoot = yield* tmpdirScoped()
         const remoteDir = path.join(remoteRoot, "owner")
@@ -152,7 +152,7 @@ describe("tool.repo_clone", () => {
   it.live("clones a configured branch", () =>
     provideTmpdirInstance((_dir) =>
       Effect.gen(function* () {
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         const source = yield* tmpdirScoped({ git: true })
         const remoteRoot = yield* tmpdirScoped()
         const remoteDir = path.join(remoteRoot, "owner")

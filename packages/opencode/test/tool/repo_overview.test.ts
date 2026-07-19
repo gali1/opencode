@@ -1,7 +1,7 @@
 import { afterEach, describe, expect } from "bun:test"
 import path from "path"
 import { Cause, Effect, Exit, Layer } from "effect"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Agent } from "../../src/agent/agent"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Git } from "../../src/git"
@@ -30,7 +30,7 @@ const ctx = {
 const it = testEffect(
   Layer.mergeAll(
     Agent.defaultLayer,
-    AppFileSystem.defaultLayer,
+    FileSystem.defaultLayer,
     CrossSpawnSpawner.defaultLayer,
     Git.defaultLayer,
     Truncate.defaultLayer,
@@ -47,7 +47,7 @@ describe("tool.repo_overview", () => {
     provideTmpdirInstance((_dir) =>
       Effect.gen(function* () {
         const repo = yield* tmpdirScoped({ git: true })
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         yield* fs.writeWithDirs(
           path.join(repo, "package.json"),
           JSON.stringify(
@@ -100,7 +100,7 @@ describe("tool.repo_overview", () => {
   it.live("resolves relative paths from the instance directory", () =>
     provideTmpdirInstance((dir) =>
       Effect.gen(function* () {
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         yield* fs.writeWithDirs(path.join(dir, "nested", "README.md"), "# Nested\n")
 
         const tool = yield* init()
@@ -115,7 +115,7 @@ describe("tool.repo_overview", () => {
   it.live("resolves a cached repository from repository shorthand", () =>
     provideTmpdirInstance((_dir) =>
       Effect.gen(function* () {
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         const cached = path.join(Global.Path.repos, "github.com", "owner", "repo")
         yield* fs.writeWithDirs(path.join(cached, "package.json"), JSON.stringify({ name: "cached-repo" }, null, 2))
         yield* fs.writeWithDirs(path.join(cached, "README.md"), "cached\n")
@@ -149,7 +149,7 @@ describe("tool.repo_overview", () => {
   it.live("resolves cached repositories from host/path references", () =>
     provideTmpdirInstance((_dir) =>
       Effect.gen(function* () {
-        const fs = yield* AppFileSystem.Service
+        const fs = yield* FileSystem.Service
         const cached = path.join(Global.Path.repos, "gitlab.com", "group", "repo")
         yield* fs.writeWithDirs(path.join(cached, "README.md"), "cached\n")
 
