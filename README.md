@@ -180,7 +180,7 @@ If you prefer not to replace the global command, run directly from source:
 
 ```bash
 cd /path/to/opencode
-bun run packages/opencode/src/index.ts
+bun run --cwd packages/opencode --conditions=browser src/index.ts
 ```
 
 This leaves any existing global `opencode` installation untouched.
