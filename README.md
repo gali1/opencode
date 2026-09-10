@@ -163,6 +163,22 @@ EOF
 
 sudo chmod +x /usr/local/bin/opencode
 ```
+In case both the above approaches do not work try the commands below instead:
+
+```bash
+# 1. Build the native linux-x64 binary (embeds Web UI) from packages/opencode
+bun run build -- --single
+
+# 2. Back up the current binary if you want a rollback point (optional)
+sudo cp /usr/local/bin/opencode /usr/local/bin/opencode._$(date +%m-%d-%Y)_PREBUILD
+
+# 3. Install the new binary + its companion mempalace scripts (required — build.ts:160-161)
+sudo cp dist/opencode-linux-x64/bin/opencode /usr/local/bin/opencode
+sudo cp dist/opencode-linux-x64/bin/mempalace_bridge.py dist/opencode-linux-x64/bin/mempalace_rekal_engine.py /usr/local/bin/
+
+# 4. Verify
+opencode --version
+```
 
 #### Verify
 
