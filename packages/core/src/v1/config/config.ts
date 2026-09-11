@@ -166,6 +166,25 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  compression: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable or disable content-aware compression globally (default: enabled when max_chars is set)",
+      }),
+      max_chars: Schema.optional(PositiveInt).annotate({
+        description:
+          "Maximum characters of tool output to send to the model after content-aware compression. When unset, tool output is sent uncompressed except where compaction truncates it.",
+      }),
+      compressors: Schema.optional(
+        Schema.Record(Schema.String, Schema.Boolean),
+      ).annotate({
+        description:
+          "Per-compressor enable/disable toggles, keyed by content type (json, search, log, html, csv, config, code).",
+      }),
+    }),
+  ).annotate({
+    description: "Content-aware compression of tool output before it is sent to the model",
+  }),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),

@@ -35,6 +35,8 @@ import { isMedia } from "@/util/media"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { Effect, Schema } from "effect"
+import { Config } from "@/config/config"
+import { Compression } from "./compression"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -45,12 +47,6 @@ interface FetchDecompressionError extends Error {
 
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
-
-function truncateToolOutput(text: string, maxChars?: number) {
-  if (!maxChars || text.length <= maxChars) return text
-  const omitted = text.length - maxChars
-  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
-}
 
 export const Event = {
   Updated: SessionV1.Event.MessageUpdated,
@@ -134,6 +130,13 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
   options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
 ) {
   const result: UIMessage[] = []
+  // Content-aware compression replaces plain truncation. When the caller does
+  // not cap tool output size, a configured `compression.max_chars` still does;
+  // without either every tool output is sent verbatim.
+  const configService = yield* Effect.serviceOption(Config.Service)
+  const compression =
+    configService._tag === "Some" ? (yield* configService.value.get()).compression : undefined
+  const compressionMaxChars = compression?.max_chars
   const toolNames = new Set<string>()
   // Track media from tool results that need to be injected as user messages
   // for providers that don't support that media type in tool results.
@@ -290,9 +293,10 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         if (part.type === "tool") {
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
+            const maxChars = options?.toolOutputMaxChars ?? compressionMaxChars
             const outputText = part.state.time.compacted
               ? "[Old tool result content cleared]"
-              : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
+              : maxChars ? Compression.compressByType(part.state.output, maxChars, compression) : part.state.output
             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 
             // For providers that don't support media in tool results, extract media files
