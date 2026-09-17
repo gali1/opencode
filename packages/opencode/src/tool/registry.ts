@@ -10,9 +10,6 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
-import { TaskStatusTool } from "./task_status"
-import { RepoCloneTool } from "./repo_clone"
-import { RepoOverviewTool } from "./repo_overview"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
@@ -59,10 +56,14 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { McpCatalog } from "@/mcp/catalog"
 import { MempalaceTool } from "./mempalace"
 import { AnchoredEditTool } from "./anchored-edit"
-import { SessionStatus } from "@/session/status"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
-  return providerID === ProviderV2.ID.opencode || flags.exa || flags.parallel
+  return (
+    providerID === ProviderV2.ID.opencode ||
+    providerID === ProviderV2.ID.make("opencode-go") ||
+    flags.exa ||
+    flags.parallel
+  )
 }
 
 type TaskDef = Tool.InferDef<typeof TaskTool>
@@ -101,7 +102,6 @@ const layer = Layer.effect(
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
-    const taskStatus = yield* TaskStatusTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
@@ -116,11 +116,11 @@ const layer = Layer.effect(
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
+    const mempalace = yield* MempalaceTool
+    const anchoredEdit = yield* AnchoredEditTool
     const agent = yield* Agent.Service
     const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
     const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
-    const mempalace = yield* MempalaceTool
-    const anchoredEdit = yield* AnchoredEditTool
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
@@ -229,7 +229,6 @@ const layer = Layer.effect(
           plan: Tool.init(plan),
           mempalace: Tool.init(mempalace),
           anchored_edit: Tool.init(anchoredEdit),
-          task_status: Tool.init(taskStatus),
           ...(codeModeTool ? { execute: Tool.init(codeModeTool) } : {}),
         })
 
@@ -255,7 +254,6 @@ const layer = Layer.effect(
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
             tool.mempalace,
             tool.anchored_edit,
-            ...(flags.experimentalBackgroundSubagents ? [tool.task_status] : []),
           ],
           task: tool.task,
           read: tool.read,
@@ -459,7 +457,6 @@ export const node = LayerNode.make({
     MCP.node,
     Database.node,
     Ripgrep.node,
-    SessionStatus.node,
   ],
 })
 

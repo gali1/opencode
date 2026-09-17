@@ -48,11 +48,6 @@ import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import {
-  ensureMempalaceBridge,
-  mempalaceIpcCall,
-  getMempalaceDataDir,
-} from "@/tool/mempalace"
 import { Database } from "@opencode-ai/core/database/database"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -1115,9 +1110,9 @@ const layer = Layer.effect(
 
           if (
             lastAssistant?.finish &&
-            !["tool-calls"].includes(lastAssistant.finish) &&
+            !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.id < lastAssistant.id
+            lastAssistant.parentID === lastUser.id
           ) {
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
@@ -1141,37 +1136,6 @@ const layer = Layer.effect(
               modelID: lastUser.model.modelID,
               providerID: lastUser.model.providerID,
               history: msgs,
-            }).pipe(Effect.ignore, Effect.forkIn(scope))
-
-            // ── MemPalace session diary — start entry ──────────────────
-            yield* Effect.gen(function* () {
-              const dataDir = getMempalaceDataDir(ctx.worktree)
-              yield* Effect.promise(() => ensureMempalaceBridge(dataDir))
-              const firstUserText = msgs
-                .filter((m) => m.info.role === "user")
-                .flatMap((m) =>
-                  m.parts
-                    .filter(
-                      (p) =>
-                        p.type === "text" &&
-                        !("synthetic" in p && p.synthetic) &&
-                        !("ignored" in p && p.ignored),
-                    )
-                    .map((p) => (p as MessageV2.TextPart).text.trim()),
-                )
-                .filter(Boolean)
-                .join(" ")
-                .substring(0, 500)
-              if (!firstUserText) return
-              yield* Effect.promise(() =>
-                mempalaceIpcCall({
-                  operation: "diary_write",
-                  agent_name: "opencode",
-                  entry: `Session started. User intent: ${firstUserText}`,
-                  topic: "session",
-                  wing: "project",
-                }),
-              )
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
@@ -1303,60 +1267,6 @@ const layer = Layer.effect(
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),
             ]
-
-            // ── MemPalace auto-retrieval ─────────────────────────────────
-            yield* Effect.gen(function* () {
-              const dataDir = getMempalaceDataDir(ctx.worktree)
-              yield* Effect.promise(() => ensureMempalaceBridge(dataDir))
-              const queryParts: string[] = []
-              const recentMsgs = msgs.slice(-4)
-              for (const m of recentMsgs) {
-                if (m.info.role !== "user") continue
-                for (const p of m.parts) {
-                  if (
-                    p.type === "text" &&
-                    !("synthetic" in p && p.synthetic) &&
-                    !("ignored" in p && p.ignored) &&
-                    p.text.trim()
-                  ) {
-                    queryParts.push(p.text.trim())
-                  }
-                }
-              }
-              const query = queryParts.join(" ").slice(0, 500)
-              if (!query) return
-              const raw = yield* Effect.promise(() =>
-                mempalaceIpcCall({
-                  operation: "memory_search",
-                  query,
-                  limit: 3,
-                }),
-              )
-              const envelope = raw as Record<string, unknown>
-              const results = ((envelope?.results ?? []) as Array<Record<string, unknown>>).filter(
-                (r) => typeof r.similarity === "number" && (r.similarity as number) > 0.3,
-              )
-              if (!results.length) return
-              const memoryLines = results
-                .map((r, i) => {
-                  const sim = (r.similarity as number).toFixed(3)
-                  const wing = r.wing ?? "project"
-                  const room = r.room ?? "general"
-                  const text = String(r.text ?? "").substring(0, 800)
-                  return `[${i + 1}] sim=${sim} ${wing}/${room}\n${text}`
-                })
-                .join("\n\n")
-              if (memoryLines.trim()) {
-                system.push(
-                  [
-                    "<mempalace_context>",
-                    "Retrieved from persistent memory. Validate against current state before relying on them:",
-                    memoryLines,
-                    "</mempalace_context>",
-                  ].join("\n"),
-                )
-              }
-            }).pipe(Effect.ignore)
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
@@ -1416,36 +1326,6 @@ const layer = Layer.effect(
                 overflow: !handle.message.finish,
               })
             }
-            // ── MemPalace auto-storage ────────────────────────────────
-            yield* Effect.gen(function* () {
-              if (result !== "continue") return
-              const dataDir = getMempalaceDataDir(ctx.worktree)
-              yield* Effect.promise(() => ensureMempalaceBridge(dataDir))
-              const parts = handle.message.parts ?? []
-              const textContent = parts
-                .filter((p): p is SessionV1.TextPart => p.type === "text")
-                .map((p) => p.text)
-                .join("\n")
-                .trim()
-              const toolSummaries = parts
-                .filter((p): p is SessionV1.ToolPart => p.type === "tool" && p.state.status === "completed")
-                .map((p) => {
-                  return `[${p.tool}] ${p.state.title || ""}: ${String(p.state.output).substring(0, 300)}`
-                })
-                .join("\n")
-              const storeContent = [textContent, toolSummaries]
-                .filter(Boolean)
-                .join("\n\n---\n\n")
-              if (storeContent.length < 50) return
-              yield* Effect.promise(() =>
-                mempalaceIpcCall({
-                  operation: "store",
-                  wing: "project",
-                  room: "conversation",
-                  content: storeContent.substring(0, 4000),
-                }),
-              )
-            }).pipe(Effect.ignore, Effect.forkIn(scope))
             return "continue" as const
           }).pipe(
             Effect.ensuring(instruction.clear(handle.message.id)),
@@ -1454,21 +1334,6 @@ const layer = Layer.effect(
           if (outcome === "break") break
           continue
         }
-
-        // ── MemPalace session diary — end entry ────────────────────
-        yield* Effect.gen(function* () {
-          const dataDir = getMempalaceDataDir(ctx.worktree)
-          yield* Effect.promise(() => ensureMempalaceBridge(dataDir))
-          yield* Effect.promise(() =>
-            mempalaceIpcCall({
-              operation: "diary_write",
-              agent_name: "opencode",
-              entry: `Session ended after ${step} steps. SessionID: ${sessionID}`,
-              topic: "session",
-              wing: "project",
-            }),
-          )
-        }).pipe(Effect.ignore, Effect.forkIn(scope))
 
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
         return yield* lastAssistant(sessionID)

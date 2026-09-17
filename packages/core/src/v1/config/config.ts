@@ -156,7 +156,7 @@ export const Info = Schema.Struct({
       }),
       tail_turns: Schema.optional(NonNegativeInt).annotate({
         description:
-          "Number of recent user turns, including their following assistant/tool responses, to keep verbatim during compaction (default: 2)",
+          "Maximum number of recent user turns, including their following assistant/tool responses, to keep verbatim during compaction. By default retention is limited only by the preserved token budget.",
       }),
       preserve_recent_tokens: Schema.optional(NonNegativeInt).annotate({
         description: "Maximum number of tokens from recent turns to preserve verbatim after compaction",
@@ -175,9 +175,7 @@ export const Info = Schema.Struct({
         description:
           "Maximum characters of tool output to send to the model after content-aware compression. When unset, tool output is sent uncompressed except where compaction truncates it.",
       }),
-      compressors: Schema.optional(
-        Schema.Record(Schema.String, Schema.Boolean),
-      ).annotate({
+      compressors: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)).annotate({
         description:
           "Per-compressor enable/disable toggles, keyed by content type (json, search, log, html, csv, config, code).",
       }),
