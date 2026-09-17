@@ -4,7 +4,7 @@ import * as path from "path"
 import * as Tool from "./tool"
 import { InstanceState } from "@/effect/instance-state"
 import { LSP } from "@/lsp/lsp"
-import { FileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 
 import {
     reconcileAnchors,
@@ -309,7 +309,7 @@ export const AnchoredEditTool = Tool.define(
                         // ── Self-validation gate (DEL #9/#10) ──
                         // Capture the pre-edit error baseline so we only react to
                         // errors this edit introduces, not pre-existing ones.
-                        const normalizedPath = FileSystem.normalizePath(absolutePath)
+                        const normalizedPath = FSUtil.normalizePath(absolutePath)
                         const hasLsp = yield* lsp.hasClients(absolutePath)
                         let baselineErrors = 0
                         if (hasLsp) {
