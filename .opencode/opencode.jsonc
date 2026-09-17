@@ -14,7 +14,7 @@
   },
   "mcp": {},
   "tools": {
-    "github-triage": false,
-    "github-pr-search": false,
+    "github-triage": true,
+    "github-pr-search": true,
   },
 }
