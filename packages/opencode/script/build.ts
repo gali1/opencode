@@ -191,7 +191,11 @@ for (const item of targets) {
     ],
     define: {
       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
-      OPENCODE_VERSION: `'${Script.version}'`,
+      // Preview/dev builds compute a `0.0.0-<channel>-<timestamp>` version, which
+      // fails downstream semver gates (e.g. Console's free-tier requires >= 1.17.0).
+      // Fall back to the package.json version so local builds report a valid version;
+      // release builds set OPENCODE_VERSION explicitly and keep their real version.
+      OPENCODE_VERSION: `'${Script.version.startsWith("0.0.0-") ? pkg.version : Script.version}'`,
       OPENCODE_MODELS_DEV: generated.modelsData,
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + treeSitterWorkerPath,
       OPENCODE_WORKER_PATH: workerPath,
