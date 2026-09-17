@@ -2021,6 +2021,13 @@ export type Config = {
     preserve_recent_tokens?: number
     reserved?: number
   }
+  compression?: {
+    enabled?: boolean
+    max_chars?: number
+    compressors?: {
+      [key: string]: boolean
+    }
+  }
   experimental?: {
     disable_paste_summary?: boolean
     batch_tool?: boolean
