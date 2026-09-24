@@ -68,12 +68,12 @@ nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev
 
 OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
 
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
+| Platform              | Download                              |
+| --------------------- | ------------------------------------- |
+| macOS (Apple Silicon) | `opencode-desktop-darwin-aarch64.dmg` |
+| macOS (Intel)         | `opencode-desktop-darwin-x64.dmg`     |
+| Windows               | `opencode-desktop-windows-x64.exe`    |
+| Linux                 | `.deb`, `.rpm`, or AppImage           |
 
 ```bash
 # macOS (Homebrew)
@@ -95,6 +95,180 @@ The install script respects the following priority order for the installation pa
 # Examples
 OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
+```
+
+### Building from Source
+
+If you want to run this fork (with MemPalace integration) instead of the official release, build and install from source. This replaces any existing `opencode` command on your system.
+
+#### Prerequisites
+
+- [Bun](https://bun.sh) v1.1+ (`curl -fsSL https://bun.sh/install | bash`)
+- [Node.js](https://nodejs.org) v20+ (for `npm link`)
+- [Python](https://python.org) 3.12+ (for MemPalace support)
+- Git
+
+#### Clone and install
+
+```bash
+git clone https://github.com/gali1/opencode.git
+cd opencode
+bun install
+```
+
+#### Remove existing OpenCode (if installed)
+
+```bash
+# npm
+npm uninstall -g opencode-ai
+
+# Homebrew
+brew uninstall opencode
+
+# Scoop
+scoop uninstall opencode
+
+# Manual install (curl script)
+rm -f "$HOME/.opencode/bin/opencode" "$HOME/bin/opencode" "$HOME/.local/bin/opencode"
+```
+
+> [!IMPORTANT]
+> You must remove the existing installation first. Running `npm link` while the official package is still installed globally can cause conflicts where the system continues to resolve the old binary.
+
+#### Link globally
+
+```bash
+# From the repo root — link the CLI so `opencode` resolves to your local source
+cd packages/opencode
+bun link
+```
+
+If `bun link` does not place the binary on your `$PATH`, create a wrapper manually:
+
+```bash
+# Adjust the path to wherever your clone lives
+echo '#!/bin/sh
+exec bun run /home/$USER/opencode/packages/opencode/src/index.ts "$@"' \
+  | sudo tee /usr/local/bin/opencode > /dev/null
+sudo chmod +x /usr/local/bin/opencode
+```
+In case the above approach do not work try the commands below instead:
+
+```bash
+sudo tee /usr/local/bin/opencode > /dev/null <<'EOF'
+#!/bin/sh
+cd /home/$USER/opencode || exit 1
+exec bun run --cwd packages/opencode --conditions=browser src/index.ts "$@"
+EOF
+
+sudo chmod +x /usr/local/bin/opencode
+```
+In case both the above approaches do not work try the commands below instead:
+
+```bash
+# 1. Build the native linux-x64 binary (embeds Web UI) from packages/opencode
+bun run build -- --single
+
+# 2. Back up the current binary if you want a rollback point (optional)
+sudo cp /usr/local/bin/opencode /usr/local/bin/opencode._$(date +%m-%d-%Y)_PREBUILD
+
+# 3. Install the new binary + its companion mempalace scripts (required — build.ts:160-161)
+sudo cp dist/opencode-linux-x64/bin/opencode /usr/local/bin/opencode
+sudo cp dist/opencode-linux-x64/bin/mempalace_bridge.py dist/opencode-linux-x64/bin/mempalace_rekal_engine.py /usr/local/bin/
+
+# 4. Verify
+opencode --version
+```
+
+#### Verify
+
+```bash
+# Should print the version from your local source
+opencode --version
+
+# Should resolve to your local wrapper or bun link path
+which opencode
+```
+
+#### Run without global install (alternative)
+
+If you prefer not to replace the global command, run directly from source:
+
+```bash
+cd /path/to/opencode
+bun run --cwd packages/opencode --conditions=browser src/index.ts
+```
+
+This leaves any existing global `opencode` installation untouched.
+
+#### Install MemPalace
+
+```bash
+pip install mempalace
+```
+
+Without this, OpenCode still works — agents just won't have persistent memory.
+
+#### Updating
+
+```bash
+cd /path/to/opencode
+git pull
+bun install
+```
+
+The global `opencode` command automatically picks up the new build since `npm link` creates a symlink.
+
+#### Reverting to the official release
+
+```bash
+# Remove the source link
+cd /path/to/opencode/packages/opencode
+bun unlink
+
+# If you created the manual wrapper
+sudo rm /usr/local/bin/opencode
+
+# Reinstall the official release
+npm i -g opencode-ai@latest
+```
+
+### Persistent Memory (MemPalace)
+
+OpenCode includes built-in support for [MemPalace](https://github.com/anomalyco/mempalace) — a local-first, semantic memory system that gives agents persistent recall across sessions.
+
+Without MemPalace, each session starts from scratch. With it, agents can remember prior decisions, architecture patterns, discovered bugs, and reasoning traces — and retrieve them instantly via semantic search instead of re-reading your entire codebase.
+
+#### What it does
+
+- **Semantic search** — agents query past context by meaning, not just keywords
+- **Knowledge graph** — tracks entity relationships (e.g., "AuthService depends on DatabasePool")
+- **Session diary** — agents log what they worked on, enabling continuity across sessions
+- **Project-scoped** — each project gets isolated memory, stored locally under `~/.local/share/opencode/`
+
+#### Setup
+
+MemPalace requires Python 3.12+ and is installed separately:
+
+```bash
+pip install mempalace
+```
+
+That's it. No configuration needed — OpenCode detects and initializes it automatically on first use.
+
+> [!NOTE]
+> MemPalace is optional. OpenCode works exactly the same without it — agents simply won't have cross-session memory. If `mempalace` is not installed, the tool reports a clear error on first use and all other tools continue to function normally.
+
+#### Permissions
+
+By default, the agent will ask before using MemPalace operations. To allow all memory operations without prompts, add to your config:
+
+```json
+{
+  "permissions": {
+    "mempalace": "allow"
+  }
+}
 ```
 
 ### Agents
@@ -123,6 +297,19 @@ If you're interested in contributing to OpenCode, please read our [contributing 
 ### Building on OpenCode
 
 If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
+
+### FAQ
+
+#### How is this different from Claude Code?
+
+It's very similar to Claude Code in terms of capability. Here are the key differences:
+
+- 100% open source
+- Not coupled to any provider. Although we recommend the models we provide through [OpenCode Zen](https://opencode.ai/zen), OpenCode can be used with Claude, OpenAI, Google, or even local models. As models evolve, the gaps between them will close and pricing will drop, so being provider-agnostic is important.
+- Out-of-the-box LSP support
+- A focus on TUI. OpenCode is built by neovim users and the creators of [terminal.shop](https://terminal.shop); we are going to push the limits of what's possible in the terminal.
+- A client/server architecture. This, for example, can allow OpenCode to run on your computer while you drive it remotely from a mobile app, meaning that the TUI frontend is just one of the possible clients.
+- Persistent cross-session memory via MemPalace. Agents remember what they learned, reducing redundant context and token usage over time.
 
 ---
 

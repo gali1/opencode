@@ -97,6 +97,180 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
+### 从源码构建
+
+如果你想运行此 fork（集成了 MemPalace）而非官方发行版，请从源码构建并安装。这会替换系统上已有的 `opencode` 命令。
+
+#### 前置条件
+
+- [Bun](https://bun.sh) v1.1+（`curl -fsSL https://bun.sh/install | bash`）
+- [Node.js](https://nodejs.org) v20+（用于 `npm link`）
+- [Python](https://python.org) 3.12+（用于 MemPalace 支持）
+- Git
+
+#### 克隆并安装
+
+```bash
+git clone https://github.com/gali1/opencode.git
+cd opencode
+bun install
+```
+
+#### 移除已有的 OpenCode（如果已安装）
+
+```bash
+# npm
+npm uninstall -g opencode-ai
+
+# Homebrew
+brew uninstall opencode
+
+# Scoop
+scoop uninstall opencode
+
+# 手动安装（curl 脚本）
+rm -f "$HOME/.opencode/bin/opencode" "$HOME/bin/opencode" "$HOME/.local/bin/opencode"
+```
+
+> [!IMPORTANT]
+> 你必须先移除已有的安装。在官方包仍全局安装的情况下运行 `npm link` 可能导致冲突，使系统继续解析到旧的二进制文件。
+
+#### 全局链接
+
+```bash
+# 在仓库根目录 —— 链接 CLI，使 `opencode` 解析到你的本地源码
+cd packages/opencode
+bun link
+```
+
+如果 `bun link` 没有把二进制文件放入你的 `$PATH`，请手动创建一个包装脚本：
+
+```bash
+# 将路径调整为你的克隆所在位置
+echo '#!/bin/sh
+exec bun run /home/$USER/opencode/packages/opencode/src/index.ts "$@"' \
+  | sudo tee /usr/local/bin/opencode > /dev/null
+sudo chmod +x /usr/local/bin/opencode
+```
+如果上述方法无效，请改用下面的命令：
+
+```bash
+sudo tee /usr/local/bin/opencode > /dev/null <<'EOF'
+#!/bin/sh
+cd /home/$USER/opencode || exit 1
+exec bun run --cwd packages/opencode --conditions=browser src/index.ts "$@"
+EOF
+
+sudo chmod +x /usr/local/bin/opencode
+```
+如果上述两种方法都无效，请改用下面的命令：
+
+```bash
+# 1. 从 packages/opencode 构建原生 linux-x64 二进制文件（内嵌 Web UI）
+bun run build -- --single
+
+# 2. 如果你想保留回滚点，先备份当前二进制文件（可选）
+sudo cp /usr/local/bin/opencode /usr/local/bin/opencode._$(date +%m-%d-%Y)_PREBUILD
+
+# 3. 安装新的二进制文件及其配套的 mempalace 脚本（必需 —— build.ts:160-161）
+sudo cp dist/opencode-linux-x64/bin/opencode /usr/local/bin/opencode
+sudo cp dist/opencode-linux-x64/bin/mempalace_bridge.py dist/opencode-linux-x64/bin/mempalace_rekal_engine.py /usr/local/bin/
+
+# 4. 验证
+opencode --version
+```
+
+#### 验证
+
+```bash
+# 应打印来自你本地源码的版本号
+opencode --version
+
+# 应解析到你的本地包装脚本或 bun link 路径
+which opencode
+```
+
+#### 无需全局安装即可运行（备选方案）
+
+如果你不想替换全局命令，可直接从源码运行：
+
+```bash
+cd /path/to/opencode
+bun run --cwd packages/opencode --conditions=browser src/index.ts
+```
+
+这样不会影响任何已有的全局 `opencode` 安装。
+
+#### 安装 MemPalace
+
+```bash
+pip install mempalace
+```
+
+没有它，OpenCode 仍可正常工作 —— 只是 Agent 不会拥有持久记忆。
+
+#### 更新
+
+```bash
+cd /path/to/opencode
+git pull
+bun install
+```
+
+由于 `npm link` 创建的是符号链接，全局 `opencode` 命令会自动使用新的构建。
+
+#### 恢复到官方发行版
+
+```bash
+# 移除源码链接
+cd /path/to/opencode/packages/opencode
+bun unlink
+
+# 如果你创建了手动包装脚本
+sudo rm /usr/local/bin/opencode
+
+# 重新安装官方发行版
+npm i -g opencode-ai@latest
+```
+
+### 持久化记忆 (MemPalace)
+
+OpenCode 内置了对 [MemPalace](https://github.com/anomalyco/mempalace) 的支持 —— 这是一个本地优先的语义记忆系统，让 Agent 能够跨会话持久回忆。
+
+没有 MemPalace 时，每个会话都从零开始。有了它，Agent 可以记住先前的决策、架构模式、发现的 bug 以及推理过程 —— 并通过语义搜索即时检索，而无需重新阅读你的整个代码库。
+
+#### 它能做什么
+
+- **语义搜索** —— Agent 按含义而非仅仅关键词来查询过去的上下文
+- **知识图谱** —— 追踪实体关系（例如 “AuthService 依赖 DatabasePool”）
+- **会话日记** —— Agent 记录自己所做的工作，实现跨会话的连续性
+- **项目级隔离** —— 每个项目拥有独立的记忆，本地存储于 `~/.local/share/opencode/`
+
+#### 设置
+
+MemPalace 需要 Python 3.12+，并单独安装：
+
+```bash
+pip install mempalace
+```
+
+就这样。无需配置 —— OpenCode 会在首次使用时自动检测并初始化它。
+
+> [!NOTE]
+> MemPalace 是可选的。没有它 OpenCode 也能完全正常工作 —— 只是 Agent 不会拥有跨会话记忆。如果未安装 `mempalace`，该工具会在首次使用时报告一个明确的错误，其他所有工具将继续正常运行。
+
+#### 权限
+
+默认情况下，Agent 在使用 MemPalace 操作前会先询问。若要允许所有记忆操作而不再提示，请在你的配置中添加：
+
+```json
+{
+  "permissions": {
+    "mempalace": "allow"
+  }
+}
+```
+
 ### Agents
 
 OpenCode 内置两种 Agent，可用 `Tab` 键快速切换：
@@ -122,6 +296,19 @@ OpenCode 内置两种 Agent，可用 `Tab` 键快速切换：
 ### 基于 OpenCode 进行开发
 
 如果你在项目名中使用了 “opencode”（如 “opencode-dashboard” 或 “opencode-mobile”），请在 README 里注明该项目不是 OpenCode 团队官方开发，且不存在隶属关系。
+
+### 常见问题
+
+#### 它与 Claude Code 有何不同？
+
+在能力方面，它与 Claude Code 非常相似。以下是主要区别：
+
+- 100% 开源
+- 不绑定任何服务提供商。虽然我们推荐通过 [OpenCode Zen](https://opencode.ai/zen) 提供的模型，但 OpenCode 也可以配合 Claude、OpenAI、Google 甚至本地模型使用。随着模型的发展，它们之间的差距会缩小、价格会下降，因此保持与服务提供商无关非常重要。
+- 开箱即用的 LSP 支持
+- 专注于 TUI。OpenCode 由 neovim 用户以及 [terminal.shop](https://terminal.shop) 的创作者打造；我们将不断突破终端中可能实现的极限。
+- 客户端/服务器架构。例如，这可以让 OpenCode 在你的电脑上运行，同时你通过移动应用远程操控它，也就是说 TUI 前端只是众多可能的客户端之一。
+- 通过 MemPalace 实现的跨会话持久记忆。Agent 会记住它们所学到的内容，随着时间推移减少冗余上下文和 token 消耗。
 
 ---
 

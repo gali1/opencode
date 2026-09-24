@@ -97,6 +97,180 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
+### البناء من المصدر
+
+اذا كنت تريد تشغيل هذا الـ fork (مع تكامل MemPalace) بدلا من الاصدار الرسمي، قم بالبناء والتثبيت من المصدر. هذا يستبدل اي امر `opencode` موجود على نظامك.
+
+#### المتطلبات المسبقة
+
+- [Bun](https://bun.sh) v1.1+ (`curl -fsSL https://bun.sh/install | bash`)
+- [Node.js](https://nodejs.org) v20+ (لاجل `npm link`)
+- [Python](https://python.org) 3.12+ (لدعم MemPalace)
+- Git
+
+#### الاستنساخ والتثبيت
+
+```bash
+git clone https://github.com/gali1/opencode.git
+cd opencode
+bun install
+```
+
+#### ازالة OpenCode الموجود (ان كان مثبتا)
+
+```bash
+# npm
+npm uninstall -g opencode-ai
+
+# Homebrew
+brew uninstall opencode
+
+# Scoop
+scoop uninstall opencode
+
+# التثبيت اليدوي (سكربت curl)
+rm -f "$HOME/.opencode/bin/opencode" "$HOME/bin/opencode" "$HOME/.local/bin/opencode"
+```
+
+> [!IMPORTANT]
+> يجب ازالة التثبيت الموجود اولا. تشغيل `npm link` بينما الحزمة الرسمية لا تزال مثبتة عالميا قد يسبب تعارضات حيث يستمر النظام في تحليل الملف الثنائي القديم.
+
+#### الربط عالميا
+
+```bash
+# من جذر المستودع — اربط الـ CLI بحيث يشير `opencode` الى مصدرك المحلي
+cd packages/opencode
+bun link
+```
+
+اذا لم يضع `bun link` الملف الثنائي على `$PATH`، انشئ غلافا (wrapper) يدويا:
+
+```bash
+# اضبط المسار الى مكان استنساخك
+echo '#!/bin/sh
+exec bun run /home/$USER/opencode/packages/opencode/src/index.ts "$@"' \
+  | sudo tee /usr/local/bin/opencode > /dev/null
+sudo chmod +x /usr/local/bin/opencode
+```
+اذا لم ينجح الاسلوب اعلاه، جرب الاوامر التالية بدلا منه:
+
+```bash
+sudo tee /usr/local/bin/opencode > /dev/null <<'EOF'
+#!/bin/sh
+cd /home/$USER/opencode || exit 1
+exec bun run --cwd packages/opencode --conditions=browser src/index.ts "$@"
+EOF
+
+sudo chmod +x /usr/local/bin/opencode
+```
+اذا لم ينجح الاسلوبان اعلاه، جرب الاوامر التالية بدلا منهما:
+
+```bash
+# 1. ابنِ الملف الثنائي الاصلي linux-x64 (يضمّن Web UI) من packages/opencode
+bun run build -- --single
+
+# 2. انسخ الملف الثنائي الحالي احتياطيا اذا اردت نقطة تراجع (اختياري)
+sudo cp /usr/local/bin/opencode /usr/local/bin/opencode._$(date +%m-%d-%Y)_PREBUILD
+
+# 3. ثبّت الملف الثنائي الجديد + سكربتات mempalace المرافقة له (مطلوب — build.ts:160-161)
+sudo cp dist/opencode-linux-x64/bin/opencode /usr/local/bin/opencode
+sudo cp dist/opencode-linux-x64/bin/mempalace_bridge.py dist/opencode-linux-x64/bin/mempalace_rekal_engine.py /usr/local/bin/
+
+# 4. تحقق
+opencode --version
+```
+
+#### التحقق
+
+```bash
+# يجب ان يطبع الاصدار من مصدرك المحلي
+opencode --version
+
+# يجب ان يشير الى غلافك المحلي او مسار bun link
+which opencode
+```
+
+#### التشغيل بدون تثبيت عالمي (بديل)
+
+اذا كنت تفضل عدم استبدال الامر العالمي، شغّل مباشرة من المصدر:
+
+```bash
+cd /path/to/opencode
+bun run --cwd packages/opencode --conditions=browser src/index.ts
+```
+
+هذا يترك اي تثبيت عالمي موجود لـ `opencode` دون مساس.
+
+#### تثبيت MemPalace
+
+```bash
+pip install mempalace
+```
+
+بدون هذا، يظل OpenCode يعمل — لكن الوكلاء لن يمتلكوا ذاكرة دائمة فقط.
+
+#### التحديث
+
+```bash
+cd /path/to/opencode
+git pull
+bun install
+```
+
+يلتقط امر `opencode` العالمي البناء الجديد تلقائيا لان `npm link` ينشئ رابطا رمزيا (symlink).
+
+#### العودة الى الاصدار الرسمي
+
+```bash
+# احذف رابط المصدر
+cd /path/to/opencode/packages/opencode
+bun unlink
+
+# اذا كنت قد انشأت الغلاف اليدوي
+sudo rm /usr/local/bin/opencode
+
+# اعد تثبيت الاصدار الرسمي
+npm i -g opencode-ai@latest
+```
+
+### الذاكرة الدائمة (MemPalace)
+
+يتضمن OpenCode دعما مدمجا لـ [MemPalace](https://github.com/anomalyco/mempalace) — نظام ذاكرة دلالي محلي اولا يمنح الوكلاء استرجاعا دائما عبر الجلسات.
+
+بدون MemPalace، تبدأ كل جلسة من الصفر. معه، يمكن للوكلاء تذكر القرارات السابقة وانماط البنية والاخطاء المكتشفة وآثار الاستدلال — واسترجاعها فورا عبر البحث الدلالي بدلا من اعادة قراءة قاعدة الكود بالكامل.
+
+#### ماذا يفعل
+
+- **البحث الدلالي** — يستعلم الوكلاء عن السياق السابق بالمعنى وليس بالكلمات المفتاحية فقط
+- **الرسم البياني المعرفي** — يتتبع علاقات الكيانات (مثل "AuthService depends on DatabasePool")
+- **مذكرات الجلسة** — يسجل الوكلاء ما عملوا عليه، مما يتيح الاستمرارية عبر الجلسات
+- **محصور بالمشروع** — يحصل كل مشروع على ذاكرة معزولة، مخزنة محليا تحت `~/.local/share/opencode/`
+
+#### الاعداد
+
+يتطلب MemPalace اصدار Python 3.12+ ويثبّت بشكل منفصل:
+
+```bash
+pip install mempalace
+```
+
+هذا كل شيء. لا حاجة لاي ضبط — يكتشفه OpenCode ويهيّئه تلقائيا عند اول استخدام.
+
+> [!NOTE]
+> MemPalace اختياري. يعمل OpenCode بنفس الطريقة تماما بدونه — لن يمتلك الوكلاء ذاكرة عبر الجلسات فقط. اذا لم يكن `mempalace` مثبتا، تُبلغ الاداة عن خطأ واضح عند اول استخدام وتستمر جميع الادوات الاخرى في العمل بشكل طبيعي.
+
+#### الاذونات
+
+افتراضيا، سيسأل الوكيل قبل استخدام عمليات MemPalace. للسماح بجميع عمليات الذاكرة دون مطالبات، اضف الى ضبطك:
+
+```json
+{
+  "permissions": {
+    "mempalace": "allow"
+  }
+}
+```
+
 ### Agents
 
 يتضمن OpenCode وكيليْن (Agents) مدمجين يمكنك التبديل بينهما باستخدام زر `Tab`.
@@ -123,6 +297,19 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ### البناء فوق OpenCode
 
 اذا كنت تعمل على مشروع مرتبط بـ OpenCode ويستخدم "opencode" كجزء من اسمه (مثل "opencode-dashboard" او "opencode-mobile")، يرجى اضافة ملاحظة في README توضح انه ليس مبنيا بواسطة فريق OpenCode ولا يرتبط بنا بأي شكل.
+
+### الاسئلة الشائعة
+
+#### كيف يختلف هذا عن Claude Code؟
+
+انه مشابه جدا لـ Claude Code من حيث القدرات. اليك الفروقات الرئيسية:
+
+- مفتوح المصدر بنسبة 100%
+- غير مرتبط بأي مزود. رغم اننا نوصي بالنماذج التي نوفرها عبر [OpenCode Zen](https://opencode.ai/zen)، يمكن استخدام OpenCode مع Claude او OpenAI او Google او حتى النماذج المحلية. مع تطور النماذج، ستتقلص الفجوات بينها وستنخفض الاسعار، لذا فإن الحياد تجاه المزودين امر مهم.
+- دعم LSP جاهز مباشرة
+- التركيز على TUI. بُني OpenCode بواسطة مستخدمي neovim ومنشئي [terminal.shop](https://terminal.shop)؛ سندفع حدود ما هو ممكن في الطرفية.
+- بنية عميل/خادم. هذا مثلا يتيح لـ OpenCode العمل على حاسوبك بينما تتحكم به عن بُعد من تطبيق جوال، ما يعني ان واجهة TUI ليست سوى احد العملاء المحتملين.
+- ذاكرة دائمة عبر الجلسات بواسطة MemPalace. يتذكر الوكلاء ما تعلموه، مما يقلل السياق الزائد واستهلاك الرموز مع الوقت.
 
 ---
 

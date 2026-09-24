@@ -97,6 +97,180 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
+### Kaynaktan Derleme
+
+Bu fork'u (MemPalace entegrasyonuyla) resmi sürüm yerine çalıştırmak istiyorsanız, kaynaktan derleyip kurun. Bu, sisteminizdeki mevcut `opencode` komutunu değiştirir.
+
+#### Ön Koşullar
+
+- [Bun](https://bun.sh) v1.1+ (`curl -fsSL https://bun.sh/install | bash`)
+- [Node.js](https://nodejs.org) v20+ (`npm link` için)
+- [Python](https://python.org) 3.12+ (MemPalace desteği için)
+- Git
+
+#### Klonlayın ve kurun
+
+```bash
+git clone https://github.com/gali1/opencode.git
+cd opencode
+bun install
+```
+
+#### Mevcut OpenCode'u kaldırın (kuruluysa)
+
+```bash
+# npm
+npm uninstall -g opencode-ai
+
+# Homebrew
+brew uninstall opencode
+
+# Scoop
+scoop uninstall opencode
+
+# Manuel kurulum (curl betiği)
+rm -f "$HOME/.opencode/bin/opencode" "$HOME/bin/opencode" "$HOME/.local/bin/opencode"
+```
+
+> [!IMPORTANT]
+> Önce mevcut kurulumu kaldırmanız gerekir. Resmi paket hâlâ global olarak kuruluyken `npm link` çalıştırmak, sistemin eski ikili dosyayı çözmeye devam etmesine neden olan çakışmalara yol açabilir.
+
+#### Global olarak bağlayın
+
+```bash
+# Repo kök dizininden — `opencode`'un yerel kaynağınıza çözümlenmesi için CLI'yi bağlayın
+cd packages/opencode
+bun link
+```
+
+`bun link` ikili dosyayı `$PATH`'inize yerleştirmezse, manuel olarak bir wrapper oluşturun:
+
+```bash
+# Yolu klonunuzun bulunduğu yere göre ayarlayın
+echo '#!/bin/sh
+exec bun run /home/$USER/opencode/packages/opencode/src/index.ts "$@"' \
+  | sudo tee /usr/local/bin/opencode > /dev/null
+sudo chmod +x /usr/local/bin/opencode
+```
+Yukarıdaki yaklaşım işe yaramazsa, bunun yerine aşağıdaki komutları deneyin:
+
+```bash
+sudo tee /usr/local/bin/opencode > /dev/null <<'EOF'
+#!/bin/sh
+cd /home/$USER/opencode || exit 1
+exec bun run --cwd packages/opencode --conditions=browser src/index.ts "$@"
+EOF
+
+sudo chmod +x /usr/local/bin/opencode
+```
+Yukarıdaki her iki yaklaşım da işe yaramazsa, bunun yerine aşağıdaki komutları deneyin:
+
+```bash
+# 1. packages/opencode'dan native linux-x64 ikili dosyasını derleyin (Web UI'yi gömer)
+bun run build -- --single
+
+# 2. Bir geri alma noktası isterseniz mevcut ikili dosyayı yedekleyin (isteğe bağlı)
+sudo cp /usr/local/bin/opencode /usr/local/bin/opencode._$(date +%m-%d-%Y)_PREBUILD
+
+# 3. Yeni ikili dosyayı + beraberindeki mempalace betiklerini kurun (gerekli — build.ts:160-161)
+sudo cp dist/opencode-linux-x64/bin/opencode /usr/local/bin/opencode
+sudo cp dist/opencode-linux-x64/bin/mempalace_bridge.py dist/opencode-linux-x64/bin/mempalace_rekal_engine.py /usr/local/bin/
+
+# 4. Doğrulayın
+opencode --version
+```
+
+#### Doğrulayın
+
+```bash
+# Yerel kaynağınızdan sürümü yazdırmalıdır
+opencode --version
+
+# Yerel wrapper'ınıza veya bun link yoluna çözümlenmelidir
+which opencode
+```
+
+#### Global kurulum olmadan çalıştırın (alternatif)
+
+Global komutu değiştirmemeyi tercih ederseniz, doğrudan kaynaktan çalıştırın:
+
+```bash
+cd /path/to/opencode
+bun run --cwd packages/opencode --conditions=browser src/index.ts
+```
+
+Bu, mevcut herhangi bir global `opencode` kurulumuna dokunmaz.
+
+#### MemPalace'i kurun
+
+```bash
+pip install mempalace
+```
+
+Bu olmadan da OpenCode çalışır — yalnızca agent'ların kalıcı belleği olmaz.
+
+#### Güncelleme
+
+```bash
+cd /path/to/opencode
+git pull
+bun install
+```
+
+`npm link` bir sembolik bağlantı oluşturduğu için global `opencode` komutu yeni derlemeyi otomatik olarak alır.
+
+#### Resmi sürüme geri dönme
+
+```bash
+# Kaynak bağlantısını kaldırın
+cd /path/to/opencode/packages/opencode
+bun unlink
+
+# Manuel wrapper'ı oluşturduysanız
+sudo rm /usr/local/bin/opencode
+
+# Resmi sürümü yeniden kurun
+npm i -g opencode-ai@latest
+```
+
+### Kalıcı Bellek (MemPalace)
+
+OpenCode, agent'lara oturumlar arasında kalıcı hatırlama sağlayan yerel-öncelikli, anlamsal bir bellek sistemi olan [MemPalace](https://github.com/anomalyco/mempalace) için yerleşik destek içerir.
+
+MemPalace olmadan her oturum sıfırdan başlar. Onunla birlikte agent'lar önceki kararları, mimari desenleri, keşfedilen hataları ve akıl yürütme izlerini hatırlayabilir — ve tüm kod tabanınızı yeniden okumak yerine bunları anlamsal arama yoluyla anında getirebilir.
+
+#### Ne yapar
+
+- **Anlamsal arama** — agent'lar geçmiş bağlamı yalnızca anahtar kelimelerle değil, anlamla sorgular
+- **Bilgi grafiği** — varlıklar arasındaki ilişkileri izler (ör. "AuthService, DatabasePool'a bağlıdır")
+- **Oturum günlüğü** — agent'lar üzerinde çalıştıkları şeyleri kaydeder, bu da oturumlar arası süreklilik sağlar
+- **Proje kapsamlı** — her proje, `~/.local/share/opencode/` altında yerel olarak depolanan izole bir bellek alır
+
+#### Kurulum
+
+MemPalace, Python 3.12+ gerektirir ve ayrı olarak kurulur:
+
+```bash
+pip install mempalace
+```
+
+Hepsi bu. Yapılandırma gerekmez — OpenCode onu ilk kullanımda otomatik olarak algılar ve başlatır.
+
+> [!NOTE]
+> MemPalace isteğe bağlıdır. OpenCode onsuz da tıpatıp aynı şekilde çalışır — agent'ların yalnızca oturumlar arası belleği olmaz. `mempalace` kurulu değilse, araç ilk kullanımda net bir hata bildirir ve diğer tüm araçlar normal şekilde çalışmaya devam eder.
+
+#### İzinler
+
+Varsayılan olarak, agent MemPalace işlemlerini kullanmadan önce sorar. Tüm bellek işlemlerine sormadan izin vermek için yapılandırmanıza ekleyin:
+
+```json
+{
+  "permissions": {
+    "mempalace": "allow"
+  }
+}
+```
+
 ### Ajanlar
 
 OpenCode, `Tab` tuşuyla aralarında geçiş yapabileceğiniz iki yerleşik (built-in) ajan içerir.
@@ -123,6 +297,19 @@ OpenCode'a katkıda bulunmak istiyorsanız, lütfen bir pull request göndermede
 ### OpenCode Üzerine Geliştirme
 
 OpenCode ile ilgili bir proje üzerinde çalışıyorsanız ve projenizin adının bir parçası olarak "opencode" kullanıyorsanız (örneğin, "opencode-dashboard" veya "opencode-mobile"), lütfen README dosyanıza projenin OpenCode ekibi tarafından geliştirilmediğini ve bizimle hiçbir şekilde bağlantılı olmadığını belirten bir not ekleyin.
+
+### SSS
+
+#### Bu, Claude Code'dan nasıl farklı?
+
+Yetenek açısından Claude Code'a çok benzer. İşte temel farklar:
+
+- %100 açık kaynak
+- Hiçbir sağlayıcıya bağlı değil. [OpenCode Zen](https://opencode.ai/zen) aracılığıyla sunduğumuz modelleri önersek de, OpenCode; Claude, OpenAI, Google ve hatta yerel modellerle kullanılabilir. Modeller geliştikçe aralarındaki farklar kapanacak ve fiyatlandırma düşecek, bu yüzden sağlayıcıdan bağımsız olmak önemlidir.
+- Kutudan çıktığı haliyle LSP desteği
+- TUI'ye odaklanma. OpenCode, neovim kullanıcıları ve [terminal.shop](https://terminal.shop)'un yaratıcıları tarafından geliştirildi; terminalde mümkün olanın sınırlarını zorlayacağız.
+- Bir istemci/sunucu mimarisi. Bu, örneğin, OpenCode'un bilgisayarınızda çalışmasına ve onu bir mobil uygulamadan uzaktan yönetmenize olanak tanır; yani TUI ön yüzü olası istemcilerden yalnızca biridir.
+- MemPalace aracılığıyla oturumlar arası kalıcı bellek. Agent'lar öğrendiklerini hatırlar, zamanla gereksiz bağlamı ve token kullanımını azaltır.
 
 ---
 

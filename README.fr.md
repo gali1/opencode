@@ -97,6 +97,180 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
+### Compiler depuis les sources
+
+Si vous voulez exécuter ce fork (avec l'intégration MemPalace) plutôt que la version officielle, compilez et installez depuis les sources. Cela remplace toute commande `opencode` existante sur votre système.
+
+#### Prérequis
+
+- [Bun](https://bun.sh) v1.1+ (`curl -fsSL https://bun.sh/install | bash`)
+- [Node.js](https://nodejs.org) v20+ (pour `npm link`)
+- [Python](https://python.org) 3.12+ (pour la prise en charge de MemPalace)
+- Git
+
+#### Cloner et installer
+
+```bash
+git clone https://github.com/gali1/opencode.git
+cd opencode
+bun install
+```
+
+#### Supprimer OpenCode existant (si installé)
+
+```bash
+# npm
+npm uninstall -g opencode-ai
+
+# Homebrew
+brew uninstall opencode
+
+# Scoop
+scoop uninstall opencode
+
+# Installation manuelle (script curl)
+rm -f "$HOME/.opencode/bin/opencode" "$HOME/bin/opencode" "$HOME/.local/bin/opencode"
+```
+
+> [!IMPORTANT]
+> Vous devez d'abord supprimer l'installation existante. Exécuter `npm link` alors que le paquet officiel est encore installé globalement peut provoquer des conflits où le système continue de résoudre l'ancien binaire.
+
+#### Lier globalement
+
+```bash
+# Depuis la racine du dépôt — liez la CLI afin que `opencode` pointe vers vos sources locales
+cd packages/opencode
+bun link
+```
+
+Si `bun link` ne place pas le binaire dans votre `$PATH`, créez un wrapper manuellement :
+
+```bash
+# Ajustez le chemin vers l'emplacement de votre clone
+echo '#!/bin/sh
+exec bun run /home/$USER/opencode/packages/opencode/src/index.ts "$@"' \
+  | sudo tee /usr/local/bin/opencode > /dev/null
+sudo chmod +x /usr/local/bin/opencode
+```
+Si l'approche ci-dessus ne fonctionne pas, essayez plutôt les commandes ci-dessous :
+
+```bash
+sudo tee /usr/local/bin/opencode > /dev/null <<'EOF'
+#!/bin/sh
+cd /home/$USER/opencode || exit 1
+exec bun run --cwd packages/opencode --conditions=browser src/index.ts "$@"
+EOF
+
+sudo chmod +x /usr/local/bin/opencode
+```
+Si les deux approches ci-dessus ne fonctionnent pas, essayez plutôt les commandes ci-dessous :
+
+```bash
+# 1. Compilez le binaire natif linux-x64 (intègre l'interface Web) depuis packages/opencode
+bun run build -- --single
+
+# 2. Sauvegardez le binaire actuel si vous voulez un point de restauration (optionnel)
+sudo cp /usr/local/bin/opencode /usr/local/bin/opencode._$(date +%m-%d-%Y)_PREBUILD
+
+# 3. Installez le nouveau binaire + ses scripts mempalace associés (requis — build.ts:160-161)
+sudo cp dist/opencode-linux-x64/bin/opencode /usr/local/bin/opencode
+sudo cp dist/opencode-linux-x64/bin/mempalace_bridge.py dist/opencode-linux-x64/bin/mempalace_rekal_engine.py /usr/local/bin/
+
+# 4. Vérifiez
+opencode --version
+```
+
+#### Vérifier
+
+```bash
+# Devrait afficher la version de vos sources locales
+opencode --version
+
+# Devrait pointer vers votre wrapper local ou le chemin de bun link
+which opencode
+```
+
+#### Exécuter sans installation globale (alternative)
+
+Si vous préférez ne pas remplacer la commande globale, exécutez directement depuis les sources :
+
+```bash
+cd /path/to/opencode
+bun run --cwd packages/opencode --conditions=browser src/index.ts
+```
+
+Cela laisse intacte toute installation globale existante d'`opencode`.
+
+#### Installer MemPalace
+
+```bash
+pip install mempalace
+```
+
+Sans cela, OpenCode fonctionne quand même — les agents n'auront simplement pas de mémoire persistante.
+
+#### Mettre à jour
+
+```bash
+cd /path/to/opencode
+git pull
+bun install
+```
+
+La commande globale `opencode` prend automatiquement en compte le nouveau build puisque `npm link` crée un lien symbolique.
+
+#### Revenir à la version officielle
+
+```bash
+# Supprimez le lien vers les sources
+cd /path/to/opencode/packages/opencode
+bun unlink
+
+# Si vous avez créé le wrapper manuel
+sudo rm /usr/local/bin/opencode
+
+# Réinstallez la version officielle
+npm i -g opencode-ai@latest
+```
+
+### Mémoire persistante (MemPalace)
+
+OpenCode inclut une prise en charge intégrée de [MemPalace](https://github.com/anomalyco/mempalace) — un système de mémoire sémantique local-first qui donne aux agents un rappel persistant entre les sessions.
+
+Sans MemPalace, chaque session repart de zéro. Avec lui, les agents peuvent se souvenir des décisions antérieures, des modèles d'architecture, des bugs découverts et des traces de raisonnement — et les récupérer instantanément via une recherche sémantique au lieu de relire toute votre base de code.
+
+#### Ce qu'il fait
+
+- **Recherche sémantique** — les agents interrogent le contexte passé par le sens, pas seulement par mots-clés
+- **Graphe de connaissances** — suit les relations entre entités (par exemple, « AuthService dépend de DatabasePool »)
+- **Journal de session** — les agents consignent ce sur quoi ils ont travaillé, permettant la continuité entre les sessions
+- **Portée projet** — chaque projet dispose d'une mémoire isolée, stockée localement sous `~/.local/share/opencode/`
+
+#### Configuration
+
+MemPalace nécessite Python 3.12+ et s'installe séparément :
+
+```bash
+pip install mempalace
+```
+
+C'est tout. Aucune configuration nécessaire — OpenCode le détecte et l'initialise automatiquement à la première utilisation.
+
+> [!NOTE]
+> MemPalace est optionnel. OpenCode fonctionne exactement de la même manière sans lui — les agents n'auront simplement pas de mémoire entre les sessions. Si `mempalace` n'est pas installé, l'outil signale une erreur claire à la première utilisation et tous les autres outils continuent de fonctionner normalement.
+
+#### Permissions
+
+Par défaut, l'agent demandera avant d'utiliser les opérations MemPalace. Pour autoriser toutes les opérations de mémoire sans invite, ajoutez à votre configuration :
+
+```json
+{
+  "permissions": {
+    "mempalace": "allow"
+  }
+}
+```
+
 ### Agents
 
 OpenCode inclut deux agents intégrés que vous pouvez basculer avec la touche `Tab`.
@@ -123,6 +297,19 @@ Si vous souhaitez contribuer à OpenCode, lisez nos [docs de contribution](./CON
 ### Construire avec OpenCode
 
 Si vous travaillez sur un projet lié à OpenCode et que vous utilisez "opencode" dans le nom du projet (par exemple, "opencode-dashboard" ou "opencode-mobile"), ajoutez une note dans votre README pour préciser qu'il n'est pas construit par l'équipe OpenCode et qu'il n'est pas affilié à nous.
+
+### FAQ
+
+#### En quoi est-ce différent de Claude Code ?
+
+C'est très similaire à Claude Code en termes de capacités. Voici les principales différences :
+
+- 100% open source
+- Non couplé à un fournisseur. Bien que nous recommandions les modèles que nous proposons via [OpenCode Zen](https://opencode.ai/zen), OpenCode peut être utilisé avec Claude, OpenAI, Google, ou même des modèles locaux. À mesure que les modèles évoluent, les écarts entre eux se réduiront et les prix baisseront, il est donc important d'être agnostique vis-à-vis du fournisseur.
+- Prise en charge de LSP prête à l'emploi
+- Une focalisation sur la TUI. OpenCode est développé par des utilisateurs de neovim et les créateurs de [terminal.shop](https://terminal.shop) ; nous allons repousser les limites de ce qui est possible dans le terminal.
+- Une architecture client/serveur. Cela peut par exemple permettre à OpenCode de s'exécuter sur votre ordinateur pendant que vous le pilotez à distance depuis une application mobile, ce qui signifie que le frontend TUI n'est qu'un des clients possibles.
+- Mémoire persistante entre les sessions via MemPalace. Les agents se souviennent de ce qu'ils ont appris, réduisant le contexte redondant et l'utilisation de tokens au fil du temps.
 
 ---
 

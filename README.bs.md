@@ -97,6 +97,180 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
+### Gradnja iz izvornog koda
+
+Ako želiš pokrenuti ovaj fork (sa MemPalace integracijom) umjesto zvaničnog izdanja, izgradi ga i instaliraj iz izvornog koda. Ovo zamjenjuje bilo koju postojeću `opencode` komandu na tvom sistemu.
+
+#### Preduslovi
+
+- [Bun](https://bun.sh) v1.1+ (`curl -fsSL https://bun.sh/install | bash`)
+- [Node.js](https://nodejs.org) v20+ (za `npm link`)
+- [Python](https://python.org) 3.12+ (za MemPalace podršku)
+- Git
+
+#### Kloniranje i instalacija
+
+```bash
+git clone https://github.com/gali1/opencode.git
+cd opencode
+bun install
+```
+
+#### Uklanjanje postojećeg OpenCode-a (ako je instaliran)
+
+```bash
+# npm
+npm uninstall -g opencode-ai
+
+# Homebrew
+brew uninstall opencode
+
+# Scoop
+scoop uninstall opencode
+
+# Ručna instalacija (curl skripta)
+rm -f "$HOME/.opencode/bin/opencode" "$HOME/bin/opencode" "$HOME/.local/bin/opencode"
+```
+
+> [!IMPORTANT]
+> Prvo moraš ukloniti postojeću instalaciju. Pokretanje `npm link` dok je zvanični paket još uvijek globalno instaliran može izazvati konflikte gdje sistem nastavlja koristiti stari binarni fajl.
+
+#### Globalno povezivanje
+
+```bash
+# Iz korijena repozitorija — poveži CLI tako da `opencode` pokazuje na tvoj lokalni izvorni kod
+cd packages/opencode
+bun link
+```
+
+Ako `bun link` ne postavi binarni fajl u tvoj `$PATH`, kreiraj wrapper ručno:
+
+```bash
+# Prilagodi putanju do mjesta gdje se nalazi tvoj klon
+echo '#!/bin/sh
+exec bun run /home/$USER/opencode/packages/opencode/src/index.ts "$@"' \
+  | sudo tee /usr/local/bin/opencode > /dev/null
+sudo chmod +x /usr/local/bin/opencode
+```
+Ako gornji pristup ne radi, pokušaj sa komandama ispod:
+
+```bash
+sudo tee /usr/local/bin/opencode > /dev/null <<'EOF'
+#!/bin/sh
+cd /home/$USER/opencode || exit 1
+exec bun run --cwd packages/opencode --conditions=browser src/index.ts "$@"
+EOF
+
+sudo chmod +x /usr/local/bin/opencode
+```
+Ako oba gornja pristupa ne rade, pokušaj sa komandama ispod:
+
+```bash
+# 1. Izgradi nativni linux-x64 binarni fajl (ugrađuje Web UI) iz packages/opencode
+bun run build -- --single
+
+# 2. Napravi rezervnu kopiju trenutnog binarnog fajla ako želiš tačku za vraćanje (opcionalno)
+sudo cp /usr/local/bin/opencode /usr/local/bin/opencode._$(date +%m-%d-%Y)_PREBUILD
+
+# 3. Instaliraj novi binarni fajl + prateće mempalace skripte (obavezno — build.ts:160-161)
+sudo cp dist/opencode-linux-x64/bin/opencode /usr/local/bin/opencode
+sudo cp dist/opencode-linux-x64/bin/mempalace_bridge.py dist/opencode-linux-x64/bin/mempalace_rekal_engine.py /usr/local/bin/
+
+# 4. Provjera
+opencode --version
+```
+
+#### Provjera
+
+```bash
+# Trebalo bi da ispiše verziju iz tvog lokalnog izvornog koda
+opencode --version
+
+# Trebalo bi da pokazuje na tvoj lokalni wrapper ili bun link putanju
+which opencode
+```
+
+#### Pokretanje bez globalne instalacije (alternativa)
+
+Ako ne želiš zamijeniti globalnu komandu, pokreni direktno iz izvornog koda:
+
+```bash
+cd /path/to/opencode
+bun run --cwd packages/opencode --conditions=browser src/index.ts
+```
+
+Ovo ostavlja bilo koju postojeću globalnu `opencode` instalaciju netaknutom.
+
+#### Instalacija MemPalace-a
+
+```bash
+pip install mempalace
+```
+
+Bez ovoga OpenCode i dalje radi — agenti jednostavno neće imati trajnu memoriju.
+
+#### Ažuriranje
+
+```bash
+cd /path/to/opencode
+git pull
+bun install
+```
+
+Globalna `opencode` komanda automatski preuzima novu gradnju jer `npm link` kreira simbolički link.
+
+#### Vraćanje na zvanično izdanje
+
+```bash
+# Ukloni vezu sa izvornim kodom
+cd /path/to/opencode/packages/opencode
+bun unlink
+
+# Ako si ručno kreirao wrapper
+sudo rm /usr/local/bin/opencode
+
+# Ponovo instaliraj zvanično izdanje
+npm i -g opencode-ai@latest
+```
+
+### Trajna memorija (MemPalace)
+
+OpenCode uključuje ugrađenu podršku za [MemPalace](https://github.com/anomalyco/mempalace) — lokalni, semantički memorijski sistem koji agentima daje trajno pamćenje kroz sesije.
+
+Bez MemPalace-a svaka sesija počinje iz početka. Sa njim, agenti mogu pamtiti prethodne odluke, arhitektonske obrasce, otkrivene bugove i tragove rezonovanja — te ih trenutno dohvatiti putem semantičke pretrage umjesto ponovnog čitanja cijele tvoje baze koda.
+
+#### Šta radi
+
+- **Semantička pretraga** — agenti pretražuju prošli kontekst po značenju, a ne samo po ključnim riječima
+- **Graf znanja** — prati odnose između entiteta (npr. "AuthService zavisi od DatabasePool")
+- **Dnevnik sesija** — agenti bilježe na čemu su radili, omogućavajući kontinuitet kroz sesije
+- **Ograničeno na projekat** — svaki projekat dobija izolovanu memoriju, pohranjenu lokalno u `~/.local/share/opencode/`
+
+#### Postavljanje
+
+MemPalace zahtijeva Python 3.12+ i instalira se zasebno:
+
+```bash
+pip install mempalace
+```
+
+To je to. Nije potrebna nikakva konfiguracija — OpenCode ga detektuje i inicijalizuje automatski pri prvom korištenju.
+
+> [!NOTE]
+> MemPalace je opcionalan. OpenCode radi potpuno isto i bez njega — agenti jednostavno neće imati memoriju kroz sesije. Ako `mempalace` nije instaliran, alat prijavljuje jasnu grešku pri prvom korištenju, a svi ostali alati nastavljaju normalno funkcionisati.
+
+#### Dozvole
+
+Podrazumijevano, agent će pitati prije korištenja MemPalace operacija. Da dozvoliš sve memorijske operacije bez upita, dodaj u svoju konfiguraciju:
+
+```json
+{
+  "permissions": {
+    "mempalace": "allow"
+  }
+}
+```
+
 ### Agenti
 
 OpenCode uključuje dva ugrađena agenta između kojih možeš prebacivati tasterom `Tab`.
@@ -123,6 +297,19 @@ Ako želiš doprinositi OpenCode-u, pročitaj [upute za doprinošenje](./CONTRIB
 ### Gradnja na OpenCode-u
 
 Ako radiš na projektu koji je povezan s OpenCode-om i koristi "opencode" kao dio naziva, npr. "opencode-dashboard" ili "opencode-mobile", dodaj napomenu u svoj README da projekat nije napravio OpenCode tim i da nije povezan s nama.
+
+### FAQ
+
+#### Po čemu se ovo razlikuje od Claude Code?
+
+Po mogućnostima je vrlo sličan Claude Code. Evo ključnih razlika:
+
+- 100% open source
+- Nije vezan ni za jednog provajdera. Iako preporučujemo modele koje pružamo kroz [OpenCode Zen](https://opencode.ai/zen), OpenCode se može koristiti sa Claude, OpenAI, Google, ili čak lokalnim modelima. Kako se modeli razvijaju, razlike među njima će se smanjivati, a cijene padati, pa je nezavisnost od provajdera važna.
+- LSP podrška odmah po instalaciji
+- Fokus na TUI. OpenCode grade korisnici neovim-a i tvorci [terminal.shop](https://terminal.shop); namjeravamo pomjeriti granice onoga što je moguće u terminalu.
+- Klijent/server arhitektura. Ovo, na primjer, omogućava da OpenCode radi na tvom računaru dok njime upravljaš daljinski putem mobilne aplikacije, što znači da je TUI frontend samo jedan od mogućih klijenata.
+- Trajna memorija između sesija putem MemPalace-a. Agenti pamte ono što su naučili, smanjujući suvišan kontekst i potrošnju tokena tokom vremena.
 
 ---
 
