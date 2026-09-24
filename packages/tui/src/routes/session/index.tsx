@@ -1762,6 +1762,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={display() === "edit"}>
           <Edit {...toolprops} />
         </Match>
+        <Match when={display() === "anchored_edit"}>
+          <AnchoredEdit {...toolprops} />
+        </Match>
         <Match when={display() === "task"}>
           <Task {...toolprops} />
         </Match>
@@ -2387,6 +2390,67 @@ function Execute(props: ToolProps) {
   )
 }
 
+function AnchoredEdit(props: ToolProps) {
+  const ctx = use()
+  const { theme, syntax } = useTheme()
+
+  const view = createMemo(() => {
+    const diffStyle = ctx.tui.diff_style
+    if (diffStyle === "stacked") return "unified"
+    return ctx.width > 120 ? "split" : "unified"
+  })
+
+  const files = createMemo(() => {
+    const value = props.metadata.filediffs
+    if (!Array.isArray(value)) return []
+    return value.flatMap((item) => {
+      const file = recordValue(item)
+      const patch = stringValue(file?.patch)
+      const filePath = stringValue(file?.file)
+      return file && patch && patch.trim() ? [{ patch, filePath: filePath ?? "" }] : []
+    })
+  })
+
+  return (
+    <Switch>
+      <Match when={files().length > 0}>
+        <BlockTool title={"← Anchored Edit"} part={props.part}>
+          <For each={files()}>
+            {(file) => (
+              <box paddingLeft={1}>
+                <diff
+                  diff={file.patch}
+                  view={view()}
+                  filetype={filetype(file.filePath)}
+                  syntaxStyle={syntax()}
+                  showLineNumbers={true}
+                  width="100%"
+                  wrapMode={ctx.diffWrapMode()}
+                  fg={theme.text}
+                  addedBg={theme.diffAddedBg}
+                  removedBg={theme.diffRemovedBg}
+                  contextBg={theme.diffContextBg}
+                  addedSignColor={theme.diffHighlightAdded}
+                  removedSignColor={theme.diffHighlightRemoved}
+                  lineNumberFg={theme.diffLineNumber}
+                  lineNumberBg={theme.diffContextBg}
+                  addedLineNumberBg={theme.diffAddedLineNumberBg}
+                  removedLineNumberBg={theme.diffRemovedLineNumberBg}
+                />
+              </box>
+            )}
+          </For>
+        </BlockTool>
+      </Match>
+      <Match when={true}>
+        <InlineTool icon="←" pending="Preparing edit…" complete={true} part={props.part}>
+          {props.tool} {input(props.input)}
+        </InlineTool>
+      </Match>
+    </Switch>
+  )
+}
+
 function Edit(props: ToolProps) {
   const ctx = use()
   const { theme, syntax } = useTheme()
@@ -2632,6 +2696,7 @@ const toolDisplays = new Set([
   "websearch",
   "write",
   "edit",
+  "anchored_edit",
   "task",
   "apply_patch",
   "todowrite",

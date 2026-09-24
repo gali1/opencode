@@ -5,6 +5,9 @@ import * as Tool from "./tool"
 import { InstanceState } from "@/effect/instance-state"
 import { LSP } from "@/lsp/lsp"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { createTwoFilesPatch } from "diff"
+import { trimDiff } from "./edit"
+import { Snapshot } from "@/snapshot"
 
 import {
     reconcileAnchors,
@@ -258,6 +261,11 @@ export const AnchoredEditTool = Tool.define(
                     let totalAdded = 0
                     let totalRemoved = 0
                     const filesProcessed: string[] = []
+                    // Accumulate a real unified patch per edited file so the UI can render
+                    // a proper before/after diff (like the built-in edit tool) rather than
+                    // hiding the tool output.
+                    const fileDiffs: Snapshot.FileDiff[] = []
+                    let combinedDiff = ""
 
                     for (const file of params.files) {
                         const absolutePath = path.resolve(ins.directory, file.path)
@@ -364,6 +372,13 @@ export const AnchoredEditTool = Tool.define(
                         totalRemoved += fileRemoved
                         totalEdits += resolved.length
 
+                        // Real unified patch for structured before/after rendering in the UI.
+                        const patch = trimDiff(createTwoFilesPatch(displayPath, displayPath, content, finalContent))
+                        if (patch.trim()) {
+                            combinedDiff += (combinedDiff ? "\n" : "") + patch
+                            fileDiffs.push({ file: absolutePath, patch, additions: fileAdded, deletions: fileRemoved })
+                        }
+
                         // Diff output
                         const diff = formatDiff(lines, anchors, applied)
 
@@ -411,6 +426,10 @@ export const AnchoredEditTool = Tool.define(
                             editsFailed: totalFailed,
                             linesAdded: totalAdded,
                             linesRemoved: totalRemoved,
+                            // Structured diff for the UI (renders before/after per edited region).
+                            diff: combinedDiff || undefined,
+                            filediff: fileDiffs[0],
+                            filediffs: fileDiffs,
                         },
                         output: results.join("\n\n========================================\n\n"),
                     }

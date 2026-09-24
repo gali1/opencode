@@ -2259,6 +2259,74 @@ ToolRegistry.register({
 })
 
 ToolRegistry.register({
+  name: "anchored_edit",
+  render(props) {
+    const i18n = useI18n()
+    const fileComponent = useFileComponent()
+    const pending = () => props.status === "pending" || props.status === "running"
+    const diffs = createMemo(() => {
+      const value = (props.metadata as Record<string, unknown>)?.filediffs
+      if (!Array.isArray(value)) return []
+      return value.flatMap((item) => {
+        if (!item || typeof item !== "object") return []
+        const filediff = item as Record<string, unknown>
+        const file = typeof filediff.file === "string" ? filediff.file : ""
+        const patch = typeof filediff.patch === "string" ? filediff.patch : undefined
+        if (!patch) return []
+        const additions = typeof filediff.additions === "number" ? filediff.additions : 0
+        const deletions = typeof filediff.deletions === "number" ? filediff.deletions : 0
+        return [{ file, patch, changes: { additions, deletions } }]
+      })
+    })
+    return (
+      <div data-component="edit-tool">
+        <BasicTool
+          {...props}
+          icon="code-lines"
+          defer={props.deferContent !== false}
+          trigger={
+            <div data-component="edit-trigger">
+              <div data-slot="message-part-title-area">
+                <div data-slot="message-part-title">
+                  <span data-slot="message-part-title-text">
+                    <TextShimmer text={i18n.t("ui.messagePart.title.edit")} active={pending()} />
+                  </span>
+                </div>
+              </div>
+            </div>
+          }
+        >
+          <For each={diffs()}>
+            {(entry) => (
+              <ToolFileAccordion
+                path={entry.file}
+                actions={<DiffChanges changes={entry.changes} />}
+              >
+                <div data-component="edit-content">
+                  <Dynamic
+                    component={fileComponent}
+                    mode="diff"
+                    virtualize={props.virtualizeDiff}
+                    onRendered={props.onContentRendered}
+                    {...(() => {
+                      try {
+                        const resolved = resolveFileDiff({ file: entry.file, patch: entry.patch })
+                        if (resolved) return { fileDiff: resolved, hunkSeparators: resolved.isPartial ? "simple" : "line-info-basic" }
+                      } catch {}
+                      return { before: { name: entry.file, contents: "" }, after: { name: entry.file, contents: "" } }
+                    })()}
+                  />
+                </div>
+              </ToolFileAccordion>
+            )}
+          </For>
+        </BasicTool>
+      </div>
+    )
+  },
+})
+
+ToolRegistry.register({
   name: "write",
   render(props) {
     const i18n = useI18n()
