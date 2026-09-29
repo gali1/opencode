@@ -46,6 +46,7 @@ export const Parameters = Schema.Struct({
     "memory_health",
     "memory_link",
     "memory_related",
+    "memory_recall",
     "memory_search",
     "memory_similar",
     "memory_store",
@@ -90,6 +91,79 @@ export const Parameters = Schema.Struct({
   claim: Schema.optional(Schema.String),
 
   expand_with_kg: Schema.optional(Schema.Boolean),
+
+  // ─── Identity and classification ───────────────────────────────────────
+  // Effect's Schema.Struct strips properties it does not declare, so every
+  // key the Python bridge reads must be declared here or it never reaches it.
+  // Without these, memory_update / memory_delete / memory_supersede /
+  // memory_link / memory_similar / memory_related received an empty id and
+  // always failed, and memory_store could never set a type or project.
+  // All are optional, so no existing call site changes shape.
+
+  memory_id: Schema.optional(Schema.String),
+
+  old_id: Schema.optional(Schema.String),
+
+  from_id: Schema.optional(Schema.String),
+
+  to_id: Schema.optional(Schema.String),
+
+  link_relation: Schema.optional(Schema.Literals(["supersedes", "contradicts", "related_to"])),
+
+  memory_type: Schema.optional(
+    Schema.Literals(["fact", "preference", "procedure", "context", "episode"]),
+  ),
+
+  project: Schema.optional(Schema.String),
+
+  importance: Schema.optional(Schema.Number),
+
+  // ─── Advanced retrieval (Hindsight-derived, opt-in) ────────────────────
+
+  /** "rrf" enables rank-space Reciprocal Rank Fusion across retrieval arms. */
+  fusion: Schema.optional(Schema.Literals(["rrf"])),
+
+  /** Pull in memories linked to the top hits (associative recall). */
+  graph_expand: Schema.optional(Schema.Boolean),
+
+  /** Parse a time window out of the query and prefer memories near it. */
+  temporal: Schema.optional(Schema.Boolean),
+
+  // ─── Ingestion, timeline and temporal knowledge-graph bounds ───────────
+
+  turns: Schema.optional(Schema.Array(Schema.String)),
+
+  topic: Schema.optional(Schema.String),
+
+  task: Schema.optional(Schema.String),
+
+  start: Schema.optional(Schema.String),
+
+  end: Schema.optional(Schema.String),
+
+  as_of: Schema.optional(Schema.String),
+
+  direction: Schema.optional(Schema.Literals(["in", "out", "both"])),
+
+  valid_from: Schema.optional(Schema.String),
+
+  ended: Schema.optional(Schema.String),
+
+  // ─── Per-project scoring weights (set_config) ──────────────────────────
+
+  key: Schema.optional(Schema.String),
+
+  value: Schema.optional(Schema.Number),
+
+  w_fts: Schema.optional(Schema.Number),
+
+  w_vec: Schema.optional(Schema.Number),
+
+  w_recency: Schema.optional(Schema.Number),
+
+  w_access: Schema.optional(Schema.Number),
+
+  half_life: Schema.optional(Schema.Number),
 })
 
 // ─── Subprocess manager (module-level singleton per process) ─────────────
@@ -373,6 +447,40 @@ export const MempalaceTool = Tool.define(
               const results = (envelope?.results ?? []) as unknown[]
               title = `Adaptive Search (${results.length} results)`
               output = formatSearchResults(raw, true)
+              break
+            }
+            case "memory_recall": {
+              const envelope = raw as Record<string, unknown>
+              const results = (envelope?.results ?? []) as Record<string, unknown>[]
+              const retrieval = (envelope?.retrieval ?? {}) as Record<string, unknown>
+              title = `Memory Recall (${results.length} results)`
+              const header = [
+                `mode: ${retrieval.mode ?? "unknown"}`,
+                Array.isArray(retrieval.arms) ? `arms: ${(retrieval.arms as string[]).join(", ")}` : "",
+                retrieval.graph_expanded ? `graph-expanded: ${retrieval.graph_expanded}` : "",
+                Array.isArray(retrieval.temporal_window)
+                  ? `window: ${(retrieval.temporal_window as string[]).join(" .. ")}`
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" | ")
+              output = [
+                header,
+                "",
+                ...results.map((r, i) => {
+                  const signals = [
+                    `score=${Number(r.score ?? 0).toFixed(4)}`,
+                    r.rrf_rank ? `rrf#${r.rrf_rank}` : "",
+                    r.graph_score ? `graph=${r.graph_score}` : "",
+                    r.temporal_score ? `temporal=${r.temporal_score}` : "",
+                    r.proof_count && Number(r.proof_count) > 1 ? `proof=${r.proof_count}` : "",
+                    r.via ? `via=${r.via}` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")
+                  return `[${i + 1}] ${signals}\n${String(r.content ?? "").substring(0, 2000)}`
+                }),
+              ].join("\n")
               break
             }
             case "store": {

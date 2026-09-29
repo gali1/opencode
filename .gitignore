@@ -32,3 +32,7 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# Python bytecode (mempalace bridge/engine)
+__pycache__/
+*.pyc

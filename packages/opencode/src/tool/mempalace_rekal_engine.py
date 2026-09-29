@@ -42,6 +42,20 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("mempalace_rekal")
 
+# Hindsight-derived retrieval primitives (rank fusion, graph expansion, temporal
+# analysis, evidence accumulation, contradiction detection).  Imported
+# defensively: every feature that uses them is opt-in, so a missing or broken
+# module degrades to the original weighted-sum behaviour instead of taking the
+# whole engine down.
+try:
+    import mempalace_hindsight as _hs
+
+    HINDSIGHT_AVAILABLE = True
+except Exception as _hs_err:  # pragma: no cover - exercised only on broken installs
+    _hs = None
+    HINDSIGHT_AVAILABLE = False
+    logger.debug("hindsight primitives unavailable (advanced retrieval disabled): %s", _hs_err)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  TTL-Aware LRU Cache
@@ -157,6 +171,14 @@ END;
 _MIGRATIONS = [
     "ALTER TABLE memories ADD COLUMN content_hash TEXT",
     "ALTER TABLE memories ADD COLUMN importance REAL NOT NULL DEFAULT 0.5",
+    # Evidence accumulation: how many times this memory has been independently
+    # observed.  Defaults to 1 so every pre-existing row reads as "seen once",
+    # which is exactly neutral under proof_norm() and therefore cannot change
+    # the ranking of any memory stored before this migration.
+    "ALTER TABLE memories ADD COLUMN proof_count INTEGER NOT NULL DEFAULT 1",
+    # Last time evidence for this memory was re-observed; lets recency reflect
+    # reinforcement without overwriting the original created_at.
+    "ALTER TABLE memories ADD COLUMN last_reinforced_at TEXT",
 ]
 
 
@@ -213,12 +235,32 @@ def _days_since(timestamp_str):
         return 0
 
 
-def _quote_fts(query):
+def _parse_ts(timestamp_str):
+    """Parse a stored timestamp into a naive UTC datetime, or None."""
+    if not timestamp_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(timestamp_str).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _quote_fts(query, match_any=False):
     """Build an FTS5 query that tries prefix matching for tokens ≥ 3 chars
     and falls back to exact phrase for short tokens.  Returns empty string
     when the query produces no usable tokens.
+
+    `match_any` switches the implicit AND to an explicit OR.  FTS5 ANDs bare
+    terms, so a natural-language query of more than two or three words
+    effectively requires every one of them to appear in a single memory and
+    the keyword arm returns nothing.  OR restores recall and leaves the
+    ordering to bm25 and to rank fusion, which is where it belongs.  The
+    default stays AND so existing callers see identical results.
     """
-    tokens = [t for t in re.split(r"\s+", query.replace('"', " ").replace("\x00", "")) if t]
+    tokens = [t for t in re.split(r"\s+", (query or "").replace('"', " ").replace("\x00", "")) if t]
     parts = []
     for raw in tokens:
         safe = re.sub(r"[^\w\-']", "", raw)
@@ -228,7 +270,7 @@ def _quote_fts(query):
             parts.append(f'"{safe}"*')   # prefix match on last token of phrase
         else:
             parts.append(f'"{safe}"')    # exact match for very short tokens
-    return " ".join(parts)
+    return (" OR " if match_any else " ").join(parts)
 
 
 def _content_hash(content):
@@ -284,6 +326,7 @@ class RekalEngine:
         self.db.execute("PRAGMA temp_store=MEMORY")
         self.db.executescript(SCHEMA)
         self._run_migrations()
+        self._repair_fts_if_needed()
         self.db.execute("ANALYZE")                     # refresh query-planner stats
         self.db.commit()
 
@@ -299,6 +342,55 @@ class RekalEngine:
                 except sqlite3.OperationalError as e:
                     logger.debug("Migration skipped (%s): %s", e, stmt)
         self.db.commit()
+
+    def _repair_fts_if_needed(self):
+        """Rebuild the FTS index when it has drifted out of sync with `memories`.
+
+        `memories_fts` is an external-content FTS5 table kept current by
+        triggers. If rows ever reach `memories` without the triggers firing --
+        a database created by an older build, a restore that copied only the
+        base table, an interrupted write -- the index and the table disagree.
+        SQLite then reports `database disk image is malformed` on the next
+        delete or update, because the delete trigger asks the index to remove a
+        row it never indexed, and every subsequent operation fails.
+
+        Counting both sides is cheap (FTS5 keeps its own docsize table), and a
+        rebuild is far preferable to an engine that raises on every call.
+        """
+        try:
+            # Neither obvious probe works here. `SELECT COUNT(*) FROM
+            # memories_fts` is answered from the content table, so it reports
+            # the right number even when the index holds nothing, and
+            # 'integrity-check' only validates the index's internal structure,
+            # which an empty index satisfies. The shadow `_docsize` table holds
+            # exactly one row per *indexed* document, so comparing it against
+            # `memories` is the one cheap check that actually detects drift.
+            memories = self.db.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            indexed = self.db.execute("SELECT COUNT(*) FROM memories_fts_docsize").fetchone()[0]
+            if memories == indexed:
+                return
+            logger.debug("FTS index out of sync (%s rows, %s indexed); rebuilding", memories, indexed)
+        except sqlite3.DatabaseError as exc:
+            logger.debug("FTS index unreadable (%s); rebuilding", exc)
+
+        try:
+            self.db.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+            self.db.commit()
+        except sqlite3.DatabaseError as exc:
+            # A rebuild is best-effort: if the index is too damaged to count or
+            # rebuild in place, drop and recreate it rather than leaving the
+            # engine permanently unusable.
+            logger.debug("FTS rebuild failed (%s); recreating the index", exc)
+            try:
+                self.db.execute("DROP TABLE IF EXISTS memories_fts")
+                self.db.execute(
+                    "CREATE VIRTUAL TABLE memories_fts USING fts5("
+                    "content, tags, project, content='memories', content_rowid='rowid')"
+                )
+                self.db.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+                self.db.commit()
+            except sqlite3.DatabaseError as inner:
+                logger.warning("FTS index unavailable; keyword search degraded: %s", inner)
 
     def _execute(self, sql, params=(), retries=4, base_delay=0.04):
         """Execute with exponential back-off on SQLITE_BUSY / locked errors."""
@@ -438,12 +530,20 @@ class RekalEngine:
                 "SELECT id FROM memories WHERE content_hash = ?", (chash,)
             ).fetchone()
             if existing:
-                return {
+                # Re-observing the same fact is evidence, not noise. Counting it
+                # turns repetition into a ranking signal (proof_norm) instead of
+                # silently discarding the observation as the baseline did.
+                proof = self._reinforce(existing["id"])
+                result = {
                     "success": True,
                     "memory_id": existing["id"],
                     "duplicate": True,
                     "message": "Memory already exists with identical content.",
                 }
+                if proof is not None:
+                    result["proof_count"] = proof
+                    result["reinforced"] = True
+                return result
 
         memory_id = _new_id()
         ts = _now()
@@ -473,7 +573,7 @@ class RekalEngine:
         except Exception as e:
             logger.debug("ChromaDB store failed (non-fatal): %s", e)
 
-        return {
+        result = {
             "success": True,
             "memory_id": memory_id,
             "memory_type": memory_type,
@@ -482,6 +582,84 @@ class RekalEngine:
             "room": room or "general",
             "importance": importance,
         }
+
+        # Surface disagreements at write time. The baseline exposed
+        # `memory_conflicts` but nothing ever created a `contradicts` link, so
+        # it could only ever return an empty list.
+        conflicts = self._detect_conflicts(memory_id, content, project)
+        if conflicts:
+            result["contradicts"] = conflicts
+
+        return result
+
+    def _reinforce(self, memory_id):
+        """Record another independent observation of an existing memory.
+
+        Returns the new proof count, or None if the column is not yet present
+        (a database written by an older engine that has not been reopened).
+        """
+        try:
+            self._execute(
+                "UPDATE memories SET proof_count = COALESCE(proof_count, 1) + 1, "
+                "last_reinforced_at = ? WHERE id = ?",
+                (_now(), memory_id),
+            )
+            self.db.commit()
+            self._cache.invalidate(memory_id)
+            row = self._execute(
+                "SELECT proof_count FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            return int(row["proof_count"]) if row else None
+        except sqlite3.OperationalError as exc:
+            logger.debug("reinforce skipped: %s", exc)
+            return None
+
+    def _detect_conflicts(self, memory_id, content, project, max_checked=40):
+        """Link a newly stored memory to existing memories it contradicts.
+
+        Lexical detection cannot prove a contradiction, so a hit records a
+        `contradicts` link for review rather than superseding or deleting
+        anything. Nothing is ever removed on the strength of this signal.
+        """
+        if not HINDSIGHT_AVAILABLE or not content:
+            return []
+        try:
+            # Only same-project memories of comparable length are plausible
+            # conflicts; this keeps the scan bounded on large stores.
+            if project:
+                rows = self._execute(
+                    "SELECT id, content FROM memories WHERE id != ? AND project = ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (memory_id, project, max_checked),
+                ).fetchall()
+            else:
+                rows = self._execute(
+                    "SELECT id, content FROM memories WHERE id != ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (memory_id, max_checked),
+                ).fetchall()
+
+            found = []
+            for row in rows:
+                is_conflict, confidence = _hs.detect_contradiction(content, row["content"])
+                if not is_conflict:
+                    continue
+                self._execute(
+                    "INSERT OR IGNORE INTO memory_links (from_id, to_id, relation, created_at) "
+                    "VALUES (?, ?, 'contradicts', ?)",
+                    (memory_id, row["id"], _now()),
+                )
+                found.append({
+                    "memory_id": row["id"],
+                    "confidence": confidence,
+                    "content": (row["content"] or "")[:160],
+                })
+            if found:
+                self.db.commit()
+            return found
+        except Exception as exc:
+            logger.debug("conflict detection skipped: %s", exc)
+            return []
 
     # ── Batch Store ───────────────────────────────────────────────────
 
@@ -683,6 +861,15 @@ class RekalEngine:
             "updated_at": row["updated_at"],
             "access_count": row["access_count"],
             "last_accessed_at": row["last_accessed_at"],
+            # Post-migration columns: tolerate rows read before the migration ran.
+            "proof_count": (
+                int(row["proof_count"])
+                if "proof_count" in row.keys() and row["proof_count"] is not None
+                else 1
+            ),
+            "last_reinforced_at": (
+                row["last_reinforced_at"] if "last_reinforced_at" in row.keys() else None
+            ),
         }
 
     def _fetch_memory(self, memory_id):
@@ -703,14 +890,49 @@ class RekalEngine:
 
     def search(self, query, limit=10, project=None, memory_type=None,
                wing=None, room=None, w_fts=None, w_vec=None,
-               w_recency=None, w_access=None, half_life=None):
+               w_recency=None, w_access=None, half_life=None,
+               fusion=None, graph_expand=None, temporal=None, strategy_boosts=None):
+        """Hybrid search over the Rekal store.
+
+        `fusion`, `graph_expand` and `temporal` are opt-in refinements layered
+        on top of the original weighted-sum ranking.  When all three are unset
+        (the default) this method behaves exactly as before, byte for byte, so
+        existing callers and stored weights are unaffected.
+
+        fusion="rrf"      rank-space Reciprocal Rank Fusion across the FTS,
+                          vector, graph and temporal arms, followed by bounded
+                          multiplicative boosts for recency / importance /
+                          evidence / graph activation.
+        graph_expand=True pull in memories linked to the top hits even when they
+                          match neither the text nor the vector query.
+        temporal=True     parse a time window out of the query and prefer
+                          memories near its midpoint.
+        """
         weights = self._resolve_weights(
             project, w_fts, w_vec, w_recency, w_access, half_life
         )
 
+        # ── Phase 0: Query analysis (opt-in) ──────────────────────────
+        # Separate "when" from "what" before the lexical arm runs. FTS5 ANDs
+        # its terms, so leaving "yesterday" in the query forces every stored
+        # memory to literally contain that word and collapses the arm to zero
+        # hits. Only the keyword query is rewritten; the vector arm keeps the
+        # full text, where the temporal wording is still useful signal.
+        temporal_window = None
+        lexical_query = query
+        if temporal and HINDSIGHT_AVAILABLE:
+            try:
+                temporal_window, lexical_query = _hs.analyze_query(query)
+            except Exception as exc:
+                logger.debug("query analysis skipped: %s", exc)
+                temporal_window, lexical_query = None, query
+
         # ── Phase 1: FTS5 candidates ──────────────────────────────────
         fts_scores = {}
-        fts_query = _quote_fts(query)
+        # Advanced retrieval ranks with RRF, which tolerates a wide, noisy
+        # keyword arm; the baseline path has no such re-ranking and keeps the
+        # stricter AND matching it was tuned for.
+        fts_query = _quote_fts(lexical_query, match_any=bool(fusion or graph_expand or temporal))
         if fts_query:
             try:
                 # Exclude memories that have been superseded
@@ -903,6 +1125,24 @@ class RekalEngine:
                 "source": "mempalace_drawer",
             })
 
+        # ── Phase 5.5: Advanced retrieval (opt-in, Hindsight-derived) ─
+        fusion_meta = None
+        if HINDSIGHT_AVAILABLE and (fusion or graph_expand or temporal):
+            scored, fusion_meta = self._refine_candidates(
+                query=query,
+                scored=scored,
+                limit=limit,
+                fusion=fusion,
+                graph_expand=graph_expand,
+                temporal=temporal,
+                strategy_boosts=strategy_boosts,
+                project=project,
+                memory_type=memory_type,
+                wing=wing,
+                room=room,
+                temporal_window=temporal_window,
+            )
+
         # ── Phase 6: Update access counters for Rekal entries ─────────
         ts = _now()
         for s in scored:
@@ -917,12 +1157,229 @@ class RekalEngine:
         self.db.commit()
 
         scored.sort(key=lambda x: x["score"], reverse=True)
+        if fusion_meta:
+            return {
+                "query": query,
+                "weights": weights,
+                "retrieval": fusion_meta,
+                "results": scored[:limit],
+                "total_candidates": len(scored),
+            }
         return {
             "query": query,
             "weights": weights,
             "results": scored[:limit],
             "total_candidates": len(scored),
         }
+
+    # ── Advanced retrieval (Hindsight-derived, opt-in) ────────────────
+
+    def _link_adjacency(self, seed_ids, max_nodes=2000):
+        """Undirected adjacency map over memory_links, restricted to the
+        component reachable from `seed_ids` in a couple of hops.
+
+        Links are traversed in both directions: `supersedes` and `contradicts`
+        are stored one-way, but for relatedness purposes an edge is evidence in
+        either direction.
+        """
+        if not seed_ids:
+            return {}
+        adjacency = {}
+        frontier = list(seed_ids)
+        seen = set(seed_ids)
+        for _ in range(2):
+            if not frontier or len(seen) >= max_nodes:
+                break
+            placeholders = ",".join("?" for _ in frontier)
+            rows = self._execute(
+                f"""SELECT from_id, to_id, relation FROM memory_links
+                    WHERE from_id IN ({placeholders}) OR to_id IN ({placeholders})""",
+                tuple(frontier) * 2,
+            ).fetchall()
+            next_frontier = []
+            for row in rows:
+                for src, dst in ((row["from_id"], row["to_id"]), (row["to_id"], row["from_id"])):
+                    edges = adjacency.setdefault(src, [])
+                    # A row matches both IN clauses when either endpoint is in
+                    # the frontier, so skip the duplicate rather than letting
+                    # the same edge be traversed twice.
+                    if (dst, row["relation"]) not in edges:
+                        edges.append((dst, row["relation"]))
+                    if dst not in seen:
+                        seen.add(dst)
+                        next_frontier.append(dst)
+            frontier = next_frontier
+        return adjacency
+
+    def _refine_candidates(self, query, scored, limit, fusion, graph_expand,
+                           temporal, strategy_boosts, project, memory_type,
+                           wing, room, temporal_window=None):
+        """Re-rank `scored` using rank fusion, graph expansion and temporal
+        analysis.  Returns `(results, metadata)`.
+
+        Any failure here is contained: the original `scored` list is returned
+        unchanged so an opt-in refinement can never make search worse than the
+        baseline it layers on top of.
+        """
+        try:
+            meta = {}
+            by_id = {entry["id"]: entry for entry in scored}
+
+            # Graph expansion: reach memories linked to the current hits even
+            # when they match neither the text nor the vector query. Seeds are
+            # the strongest current candidates only -- expanding from the whole
+            # pool would pull in most of a densely linked store.
+            activations = {}
+            if graph_expand:
+                seeds = [e["id"] for e in sorted(scored, key=lambda x: x["score"], reverse=True)[:10]
+                         if e.get("source") == "rekal"]
+                adjacency = self._link_adjacency(seeds)
+                activations = _hs.expand_links(seeds, adjacency, max_hops=2, budget=max(limit * 2, 20))
+                for mem_id, activation in activations.items():
+                    if mem_id in by_id:
+                        continue
+                    mem = self._fetch_memory(mem_id)
+                    if not mem:
+                        continue
+                    # Expanded memories still honour the caller's filters.
+                    if project and mem["project"] != project:
+                        continue
+                    if memory_type and mem["memory_type"] != memory_type:
+                        continue
+                    if wing and mem["wing"] != wing:
+                        continue
+                    if room and mem["room"] != room:
+                        continue
+                    entry = {
+                        "id": mem["id"],
+                        "content": mem["content"],
+                        "memory_type": mem["memory_type"],
+                        "project": mem["project"],
+                        "wing": mem["wing"],
+                        "room": mem["room"],
+                        "tags": mem["tags"],
+                        "importance": mem["importance"],
+                        "created_at": mem["created_at"],
+                        "updated_at": mem["updated_at"],
+                        "access_count": mem["access_count"],
+                        "proof_count": mem.get("proof_count", 1),
+                        "score": 0.0,
+                        "fts_score": 0.0,
+                        "vec_score": 0.0,
+                        "recency_score": 0.0,
+                        "access_score": 0.0,
+                        "source": "rekal",
+                        "via": "graph",
+                    }
+                    scored.append(entry)
+                    by_id[mem_id] = entry
+                meta["graph_expanded"] = len(activations)
+
+            # Temporal analysis: derive a window from the query text and score
+            # each candidate by how close it sits to that window's midpoint.
+            proximity = {}
+            if temporal:
+                # Reuse the window computed during query analysis so the
+                # lexical rewrite and the proximity scoring can never disagree.
+                window = temporal_window if temporal_window is not None else _hs.extract_temporal_constraint(query)
+                if window:
+                    start, end = window
+                    meta["temporal_window"] = [start.isoformat(), end.isoformat()]
+                    for entry in scored:
+                        created = _parse_ts(entry.get("created_at"))
+                        proximity[entry["id"]] = _hs.temporal_proximity(created, start, end)
+                else:
+                    meta["temporal_window"] = None
+
+            if not fusion:
+                # Graph/temporal without fusion: fold the new signals into the
+                # existing score multiplicatively, leaving its composition intact.
+                for entry in scored:
+                    entry["score"] = round(_hs.combined_score(
+                        entry["score"] or 0.0,
+                        graph=activations.get(entry["id"], 0.5) if activations else 0.5,
+                        recency=proximity.get(entry["id"], 0.5) if proximity else 0.5,
+                    ), 4)
+                    if entry["id"] in activations:
+                        entry["graph_score"] = round(activations[entry["id"]], 3)
+                    if entry["id"] in proximity:
+                        entry["temporal_score"] = round(proximity[entry["id"]], 3)
+                meta["mode"] = "boosted"
+                return scored, meta
+
+            # Rank fusion. Each arm contributes an ordering, never a raw score:
+            # bm25 rank, cosine distance, graph activation and temporal
+            # proximity are not on comparable scales, and RRF is exactly the
+            # tool for combining orderings whose scores cannot be compared.
+            arms = []
+            fts_ranked = [e["id"] for e in sorted(scored, key=lambda x: x.get("fts_score", 0.0), reverse=True)
+                          if e.get("fts_score", 0.0) > 0]
+            if fts_ranked:
+                arms.append(("fts", fts_ranked))
+            vec_ranked = [e["id"] for e in sorted(scored, key=lambda x: x.get("vec_score", 0.0), reverse=True)
+                          if e.get("vec_score", 0.0) > 0]
+            if vec_ranked:
+                arms.append(("vec", vec_ranked))
+            if activations:
+                arms.append(("graph", [mid for mid, _ in sorted(
+                    activations.items(), key=lambda kv: kv[1], reverse=True)]))
+            if proximity:
+                temporal_ranked = [mid for mid, prox in sorted(
+                    proximity.items(), key=lambda kv: kv[1], reverse=True) if prox > 0]
+                if temporal_ranked:
+                    arms.append(("temporal", temporal_ranked))
+
+            if not arms:
+                meta["mode"] = "rrf-empty"
+                return scored, meta
+
+            fused = _hs.reciprocal_rank_fusion(arms)
+            meta["mode"] = "rrf"
+            meta["arms"] = [name for name, _ in arms]
+
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            results = []
+            for item in fused:
+                entry = by_id.get(item["id"])
+                if entry is None:
+                    continue
+                base = _hs.boosted_rrf_score(
+                    item["rrf_score"], item["source_ranks"], strategy_boosts or {}
+                )
+                created = _parse_ts(entry.get("created_at"))
+                recency = _hs.recency_for_range(created, None, None, now)
+                if entry["id"] in proximity:
+                    # An explicit temporal window in the query outranks generic
+                    # freshness: the user asked about a period, not about "new".
+                    recency = proximity[entry["id"]]
+                entry["score"] = round(_hs.combined_score(
+                    base,
+                    recency=recency,
+                    importance=_importance_boost(entry.get("importance")),
+                    proof=_hs.proof_norm(entry.get("proof_count", 1)),
+                    graph=activations.get(entry["id"], 0.5) if activations else 0.5,
+                ), 6)
+                entry["rrf_score"] = round(item["rrf_score"], 6)
+                entry["rrf_rank"] = item["rrf_rank"]
+                entry["source_ranks"] = item["source_ranks"]
+                if entry["id"] in activations:
+                    entry["graph_score"] = round(activations[entry["id"]], 3)
+                if entry["id"] in proximity:
+                    entry["temporal_score"] = round(proximity[entry["id"]], 3)
+                results.append(entry)
+
+            # Anything the arms never ranked (e.g. backfill rows) keeps its
+            # original score and sorts after the fused set.
+            fused_ids = {item["id"] for item in fused}
+            for entry in scored:
+                if entry["id"] not in fused_ids:
+                    entry["score"] = round((entry.get("score") or 0.0) * 0.01, 6)
+                    results.append(entry)
+
+            return results, meta
+        except Exception as exc:
+            logger.debug("advanced retrieval failed, falling back to base ranking: %s", exc)
+            return scored, {"mode": "fallback", "error": str(exc)}
 
     # ── Build Context ─────────────────────────────────────────────────
 

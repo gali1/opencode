@@ -96,6 +96,27 @@ def handle_search(p):
         wing=p.get("wing") or None, room=p.get("room") or None,
     )
 
+def handle_smart_search(p):
+    """Drawer search with an adaptive result limit.
+
+    `smart_search` was declared by the tool schema from the start but never had
+    a handler, so every call returned "Unknown operation" and the adaptive
+    formatter on the TypeScript side was unreachable. It widens the candidate
+    window for short, ambiguous queries -- where the user has given the least
+    signal and recall matters most -- and narrows it for long specific ones.
+    """
+    query = p.get("query", "") or ""
+    requested = p.get("limit")
+    if requested is not None:
+        limit = int(requested)
+    else:
+        terms = len([t for t in query.split() if t])
+        limit = 12 if terms <= 2 else (8 if terms <= 5 else 5)
+    return _mcp_mod.tool_search(
+        query=query, limit=limit,
+        wing=p.get("wing") or None, room=p.get("room") or None,
+    )
+
 def handle_store(p):
     return _mcp_mod.tool_add_drawer(
         wing=p.get("wing", "project"), room=p.get("room", "general"),
@@ -181,6 +202,7 @@ def handle_memory_store(p):
         memory_type=p.get("memory_type", "fact"),
         project=p.get("project"), wing=p.get("wing"),
         room=p.get("room"), tags=p.get("tags"),
+        importance=p.get("importance", 0.5),
     )
 
 def handle_memory_search(p):
@@ -192,6 +214,26 @@ def handle_memory_search(p):
         wing=p.get("wing"), room=p.get("room"),
         w_fts=p.get("w_fts"), w_vec=p.get("w_vec"),
         w_recency=p.get("w_recency"), half_life=p.get("half_life"),
+        # Advanced retrieval. Absent keys leave the original ranking in place.
+        fusion=p.get("fusion"), graph_expand=p.get("graph_expand"),
+        temporal=p.get("temporal"), strategy_boosts=p.get("strategy_boosts"),
+    )
+
+def handle_memory_recall(p):
+    """Advanced recall: rank fusion + graph expansion + temporal analysis on
+    by default. `memory_search` stays byte-compatible for existing callers;
+    this is the opt-in entry point that turns everything on at once.
+    """
+    err = _require_engine()
+    if err: return err
+    return _ENGINE.search(
+        query=p.get("query", ""), limit=int(p.get("limit", 10)),
+        project=p.get("project"), memory_type=p.get("memory_type"),
+        wing=p.get("wing"), room=p.get("room"),
+        fusion=p.get("fusion", "rrf"),
+        graph_expand=p.get("graph_expand", True),
+        temporal=p.get("temporal", True),
+        strategy_boosts=p.get("strategy_boosts"),
     )
 
 def handle_memory_update(p):
@@ -308,6 +350,7 @@ def handle_set_config(p):
 HANDLERS = {
     # MemPalace native (drawer-level)
     "search": handle_search,
+    "smart_search": handle_smart_search,
     "store": handle_store,
     "status": handle_status,
     "list_wings": handle_list_wings,
@@ -320,6 +363,7 @@ HANDLERS = {
     # Rekal engine (structured memory)
     "memory_store": handle_memory_store,
     "memory_search": handle_memory_search,
+    "memory_recall": handle_memory_recall,
     "memory_update": handle_memory_update,
     "memory_supersede": handle_memory_supersede,
     "memory_delete": handle_memory_delete,

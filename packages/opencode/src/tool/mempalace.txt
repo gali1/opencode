@@ -29,7 +29,7 @@ LONG-TERM (goes to mempalace immediately):
 ### Phase 3: Missing Context Detection
 When you realize you're missing context:
 1. Check: is it in the current prompt? → Use it directly
-2. Not in prompt? → Call memory_search or build_context to retrieve from mempalace
+2. Not in prompt? → Call memory_recall (or build_context) to retrieve from mempalace
 3. Still not found? → Ask the user or use file tools
 
 NEVER guess when mempalace might have the answer. Query it.
@@ -64,16 +64,39 @@ Before the session ends:
 - kg_add, kg_query, kg_invalidate: Knowledge graph entity relationships
 
 ### Rekal engine (structured memories with lifecycle)
-- memory_store: Store a typed, tagged memory
+- memory_store: Store a typed, tagged memory. Pass memory_id-free content plus
+  memory_type, project, tags, importance (0-1).
 - memory_search: Hybrid search (BM25 + vector + recency) with configurable weights
-- memory_update: Edit an existing memory
-- memory_supersede: Replace a memory while preserving history. ALWAYS prefer over delete+store.
-- memory_delete: Remove a memory
-- memory_link: Connect memories (supersedes, contradicts, related_to)
+- memory_recall: PREFERRED for retrieval. Same store, stronger ranking — rank
+  fusion across keyword/vector/graph/time, associative expansion through links,
+  and natural-language time windows. Use this when you want the best answer and
+  memory_search when you need the exact legacy scoring.
+- memory_update: Edit an existing memory (requires memory_id)
+- memory_supersede: Replace a memory while preserving history (requires old_id).
+  ALWAYS prefer over delete+store.
+- memory_delete: Remove a memory (requires memory_id)
+- memory_link: Connect memories (from_id, to_id, link_relation)
 - memory_conflicts: Find contradicting pairs
 - memory_health: Database statistics
 - memory_similar, memory_topics, memory_timeline, memory_related: Introspection
-- set_config: Per-project scoring weights
+- set_config: Per-project scoring weights (project, key, value)
+
+### Retrieval tuning (memory_recall / memory_search)
+- fusion="rrf": combine retrieval strategies by rank instead of raw score.
+- graph_expand=true: also return memories linked to the top hits, even when they
+  match neither the text nor the vector query. This is how you recover context
+  that uses different vocabulary than your question.
+- temporal=true: read a time window out of the query ("yesterday", "last week",
+  "March 2026", "3 days ago") and prefer memories from that period. The time
+  words are removed from the keyword match, so they never suppress results.
+
+### Evidence and contradictions (automatic)
+- Storing content that already exists does not create a duplicate; it increments
+  that memory's proof_count. Repeatedly observed facts rank higher. Do not try
+  to avoid re-storing something you have seen again — the repetition is signal.
+- Storing content that negates an existing memory automatically records a
+  `contradicts` link and returns it under `contradicts`. Nothing is deleted:
+  review the pair and call memory_supersede if the new statement wins.
 
 ### Verification
 - contradiction_check: Check before storing new facts
@@ -83,7 +106,7 @@ Before the session ends:
 ## Storing Rules
 
 ### ALWAYS search before storing
-1. mempalace operation=memory_search query="<topic>" limit=5
+1. mempalace operation=memory_recall query="<topic>" limit=5
 2. Duplicate exists → skip
 3. Same topic, outdated → memory_supersede(old_id, content)
 4. No match → memory_store(content, memory_type, tags)
