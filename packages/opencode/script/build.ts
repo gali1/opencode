@@ -218,6 +218,15 @@ for (const item of targets) {
     }
   }
 
+  // The mempalace bridge and its Python engine are loaded from disk beside the
+  // binary at runtime (see src/tool/mempalace.ts BRIDGE_SCRIPT), not embedded.
+  // Ship them next to the executable so a built dist is self-contained; the
+  // engine imports mempalace_hindsight at runtime, so all three must travel
+  // together or the advanced memory features silently disable themselves.
+  for (const companion of ["mempalace_bridge.py", "mempalace_rekal_engine.py", "mempalace_hindsight.py"]) {
+    await Bun.file(`dist/${name}/bin/${companion}`).write(await Bun.file(`./src/tool/${companion}`).bytes())
+  }
+
   await $`rm -rf ./dist/${name}/bin/tui`
   await Bun.file(`dist/${name}/package.json`).write(
     JSON.stringify(

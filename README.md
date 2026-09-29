@@ -166,15 +166,20 @@ sudo chmod +x /usr/local/bin/opencode
 In case both the above approaches do not work try the commands below instead:
 
 ```bash
-# 1. Build the native linux-x64 binary (embeds Web UI) from packages/opencode
+# 1. Build the native linux-x64 binary (embeds Web UI) from packages/opencode.
+#    The build bundles the companion mempalace Python files into dist/.../bin.
 bun run build -- --single
 
 # 2. Back up the current binary if you want a rollback point (optional)
 sudo cp /usr/local/bin/opencode /usr/local/bin/opencode._$(date +%m-%d-%Y)_PREBUILD
 
-# 3. Install the new binary + its companion mempalace scripts (required — build.ts:160-161)
+# 3. Install the new binary. The mempalace bridge, engine and hindsight modules
+#    are loaded from beside the binary at runtime and must travel with it — all
+#    three, or the advanced memory features silently disable themselves.
 sudo cp dist/opencode-linux-x64/bin/opencode /usr/local/bin/opencode
-sudo cp dist/opencode-linux-x64/bin/mempalace_bridge.py dist/opencode-linux-x64/bin/mempalace_rekal_engine.py /usr/local/bin/
+sudo cp dist/opencode-linux-x64/bin/mempalace_bridge.py \
+        dist/opencode-linux-x64/bin/mempalace_rekal_engine.py \
+        dist/opencode-linux-x64/bin/mempalace_hindsight.py /usr/local/bin/
 
 # 4. Verify
 opencode --version
@@ -200,6 +205,24 @@ bun run --cwd packages/opencode --conditions=browser src/index.ts
 ```
 
 This leaves any existing global `opencode` installation untouched.
+
+#### Make custom tools available from any directory
+
+The `mempalace` and `anchored_edit` tools are compiled into the binary and work
+everywhere. The `github-pr-search`, `github-triage`, and `rebase-preserve_*`
+tools are project plugins under `.opencode/tool/`, so they are only discovered
+when opencode runs with its working directory inside this repo. To make them
+available from any directory, symlink them into your global opencode config:
+
+```bash
+# From the repo root — idempotent, safe to re-run after moving the repo
+bash .opencode/install-global-tools.sh
+```
+
+This links the plugin tools into `~/.config/opencode/tool/`, which opencode
+always scans regardless of the current directory. Restart opencode afterward
+(configuration is loaded once at startup). Keep the repo in place: the global
+entries are symlinks back into it.
 
 #### Install MemPalace
 
