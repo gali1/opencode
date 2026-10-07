@@ -1,3 +1,5 @@
+import { computeOptimalK } from "./adaptiveSizer"
+
 interface SearchMatch {
   file: string
   lineNumber: number
@@ -70,20 +72,29 @@ const MAX_TOTAL_MATCHES = 30
 const MAX_FILES = 15
 
 function selectMatches(fileMatches: Map<string, FileMatches>): FileMatches[] {
-  const sortedFiles = [...fileMatches.values()].sort((a, b) => {
-    const aScore = a.matches.reduce((sum, m) => sum + m.score, 0)
-    const bScore = b.matches.reduce((sum, m) => sum + m.score, 0)
-    return bScore - aScore
-  }).slice(0, MAX_FILES)
+  const sortedFiles = [...fileMatches.values()]
+    .sort((a, b) => {
+      const aScore = a.matches.reduce((sum, m) => sum + m.score, 0)
+      const bScore = b.matches.reduce((sum, m) => sum + m.score, 0)
+      return bScore - aScore
+    })
+    .slice(0, MAX_FILES)
+
+  const adaptiveTotal = computeOptimalK(
+    sortedFiles.flatMap((fm) =>
+      fm.matches.map((match) => ({ id: `${fm.file}:${match.lineNumber}:${match.content}`, score: match.score })),
+    ),
+    { minK: 5, maxK: MAX_TOTAL_MATCHES },
+  )
 
   const result: FileMatches[] = []
   let totalSelected = 0
 
   for (const fm of sortedFiles) {
-    if (totalSelected >= MAX_TOTAL_MATCHES) break
+    if (totalSelected >= adaptiveTotal) break
 
     const sorted = [...fm.matches].sort((a, b) => b.score - a.score)
-    const remainingSlots = Math.min(MAX_MATCHES_PER_FILE, MAX_TOTAL_MATCHES - totalSelected)
+    const remainingSlots = Math.min(MAX_MATCHES_PER_FILE, adaptiveTotal - totalSelected)
 
     const selected: SearchMatch[] = []
     if (sorted.length > 0) selected.push(sorted[0]!)

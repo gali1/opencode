@@ -2027,6 +2027,9 @@ export type Config = {
     compressors?: {
       [key: string]: boolean
     }
+    lossless?: boolean
+    dense_line_elision?: boolean
+    read_lifecycle?: boolean
   }
   experimental?: {
     disable_paste_summary?: boolean

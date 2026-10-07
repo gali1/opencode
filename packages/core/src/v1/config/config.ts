@@ -179,6 +179,18 @@ export const Info = Schema.Struct({
         description:
           "Per-compressor enable/disable toggles, keyed by content type (json, search, log, html, csv, config, code).",
       }),
+      lossless: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Apply format-native lossless folds (repeated line/block and path-listing folding) after per-type compression. Each fold is self-verified and only kept when strictly smaller (default: true).",
+      }),
+      dense_line_elision: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Elide very long, whitespace-free machine-generated lines (minified assets, encoded blobs) when a retrieval hint is available. Lossy; elided regions are replaced by a head/tail marker (default: false).",
+      }),
+      read_lifecycle: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "At the compaction boundary, replace stale or superseded file reads and deduplicate repeated tool outputs before building the summary (default: true).",
+      }),
     }),
   ).annotate({
     description: "Content-aware compression of tool output before it is sent to the model",

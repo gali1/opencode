@@ -1,3 +1,5 @@
+import { computeOptimalK } from "./adaptiveSizer"
+
 type LogLevel = "error" | "fail" | "warn" | "info" | "debug" | "trace" | "unknown"
 
 interface LogLine {
@@ -155,10 +157,14 @@ export function compressLog(content: string, maxChars: number): string {
   const deduped = dedupeSimilarLines(selected)
 
   const MAX_TOTAL = 100
+  const adaptiveMax = computeOptimalK(
+    scored.map((line) => ({ id: line.content, score: line.score })),
+    { minK: 10, maxK: MAX_TOTAL },
+  )
   let result: string
-  if (deduped.length > MAX_TOTAL) {
-    const kept = deduped.slice(0, MAX_TOTAL)
-    const omitted = deduped.length - MAX_TOTAL
+  if (deduped.length > adaptiveMax) {
+    const kept = deduped.slice(0, adaptiveMax)
+    const omitted = deduped.length - adaptiveMax
     result = kept.map((l) => l.content).join("\n") + `\n[... ${omitted} lines omitted]`
   } else {
     result = deduped.map((l) => l.content).join("\n")

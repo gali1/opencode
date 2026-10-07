@@ -297,7 +297,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             const outputText = part.state.time.compacted
               ? "[Old tool result content cleared]"
               : maxChars
-                ? Compression.compressByType(part.state.output, maxChars, compression)
+                ? Compression.compressByType(part.state.output, maxChars, compression, { retrievalHint: part.tool })
                 : part.state.output
             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 

@@ -6,6 +6,8 @@ import { extractHtml } from "./html"
 import { compressConfig } from "./config"
 import { compressCode } from "./code"
 import { compressCsv } from "./csv"
+import { foldLossless } from "./lossless"
+import { elideDenseLines } from "./denseLines"
 
 export type ContentType =
   | "json"
@@ -25,6 +27,7 @@ export interface DetectionResult {
 export interface CompressOptions {
   maxChars?: number
   compressors?: ConfigV1.Info["compression"]
+  retrievalHint?: string
 }
 
 const HTML_DOCTYPE = /^\s*<!doctype\s+html/i
@@ -428,20 +431,38 @@ function isCompressorEnabled(type: ContentType, cfg?: ConfigV1.Info["compression
   return true
 }
 
-export function compressByType(content: string, maxChars: number, cfg?: ConfigV1.Info["compression"]): string {
+function isLosslessEnabled(cfg?: ConfigV1.Info["compression"]): boolean {
+  if (cfg?.enabled === false) return false
+  return cfg?.lossless !== false
+}
+
+function isDenseLineElisionEnabled(cfg?: ConfigV1.Info["compression"]): boolean {
+  if (cfg?.enabled === false) return false
+  return cfg?.dense_line_elision === true
+}
+
+export function compressByType(
+  content: string,
+  maxChars: number,
+  cfg?: ConfigV1.Info["compression"],
+  opts?: CompressOptions,
+): string {
   if (!content || content.length <= maxChars) return content
 
   const detection = detectContentType(content)
 
+  let result: string
   if (detection.type !== "text" && isCompressorEnabled(detection.type, cfg)) {
     const compressor = COMPRESSORS[detection.type]
     const compressed = compressor(content, maxChars)
-    if (compressed.length <= maxChars) return compressed
-    return compressed.slice(0, maxChars)
+    result = compressed.length <= maxChars ? compressed : compressed.slice(0, maxChars)
+  } else {
+    const fallback = content.slice(0, maxChars)
+    const omitted = content.length - maxChars
+    result = omitted > 0 ? fallback + `\n[Tool output truncated for compaction: omitted ${omitted} chars]` : fallback
   }
 
-  const fallback = content.slice(0, maxChars)
-  const omitted = content.length - maxChars
-  if (omitted > 0) return fallback + `\n[Tool output truncated for compaction: omitted ${omitted} chars]`
-  return fallback
+  const folded = isLosslessEnabled(cfg) ? foldLossless(result) : result
+  if (!isDenseLineElisionEnabled(cfg) || !opts?.retrievalHint) return folded
+  return elideDenseLines(folded, { retrievalHint: opts.retrievalHint }).text
 }
