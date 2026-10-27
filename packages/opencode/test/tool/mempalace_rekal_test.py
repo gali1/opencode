@@ -284,6 +284,106 @@ def test_temporal_retrieval():
     check("no temporal intent yields no window", plain["retrieval"].get("temporal_window") is None)
 
 
+def test_timeline_bounds():
+    print("timeline date bounds")
+
+    eng = engine()
+    dated = [
+        ("older note alpha", "2026-09-18 10:00:00"),
+        ("today note beta", "2026-10-27 09:15:00"),
+        ("today note gamma", "2026-10-27 19:29:17"),
+    ]
+    for text, ts in dated:
+        memory_id = eng.store(text, project="p")["memory_id"]
+        eng.db.execute("UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?", (ts, ts, memory_id))
+    eng.db.commit()
+
+    def contents(start, end):
+        return sorted(r["content"] for r in eng.timeline(project="p", start=start, end=end, limit=10))
+
+    expected_today = ["today note beta", "today note gamma"]
+
+    # Regression: stored timestamps use a space separator, so ISO bounds
+    # (' ' < 'T') previously excluded every row and returned [].
+    check("date-only bounds include the whole day", contents("2026-10-27", "2026-10-27") == expected_today)
+    check("ISO 'T' bounds work", contents("2026-10-27T00:00:00", "2026-10-27T23:59:59") == expected_today)
+    check("space-separated bounds work", contents("2026-10-27 00:00:00", "2026-10-27 23:59:59") == expected_today)
+    check("fractional seconds work", contents("2026-10-27T00:00:00.000000", "2026-10-27T23:59:59.999999") == expected_today)
+    check("timezone offset is normalised", contents("2026-10-27T00:00:00Z", "2026-10-27T23:59:59Z") == expected_today)
+    check("single-day end includes the final second", contents("2026-10-27T19:29:17", "2026-10-27") == ["today note gamma"])
+    check("range spanning months works", contents("2026-09-01", "2026-09-30") == ["older note alpha"])
+    check("no bounds returns everything", len(contents(None, None)) == 3)
+    check("start only works", len(contents("2026-10-01", None)) == 2)
+    check("end only works", len(contents(None, "2026-09-30")) == 1)
+    check("empty range is empty", contents("2020-01-01", "2020-12-31") == [])
+    check("results are newest first",
+          [r["content"] for r in eng.timeline(project="p", start="2026-10-27", end="2026-10-27")] ==
+          ["today note gamma", "today note beta"])
+
+
+def test_temporal_filtering():
+    print("temporal recall filters by date")
+
+    eng = engine()
+    for text, ts in [
+        ("older note alpha", "2026-09-18 10:00:00"),
+        ("today note beta", "2026-10-27 09:15:00"),
+        ("today note gamma", "2026-10-27 19:29:17"),
+    ]:
+        memory_id = eng.store(text, project="p")["memory_id"]
+        eng.db.execute("UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?", (ts, ts, memory_id))
+    eng.db.commit()
+
+    recalled = eng.search("memories from today", limit=10, project="p", fusion="rrf", temporal=True)
+    meta = recalled["retrieval"]
+    contents_ = [r["content"] for r in recalled["results"]]
+    check("window extracted", meta.get("temporal_window") is not None)
+    check("filter applied", meta.get("temporal_filtered") is True)
+    check("only in-window memories returned", all("today" in c for c in contents_), f"got {contents_}")
+    check("older memory excluded", "older note alpha" not in contents_)
+    check("matched count reported", meta.get("temporal_matched") == 2)
+    check("proximity scores attached", all(r.get("temporal_score") is not None for r in recalled["results"]))
+
+    # A window with no memories must not empty the response.
+    fallback = eng.search("memories from 2020", limit=10, project="p", fusion="rrf", temporal=True)
+    check("empty window does not empty results", len(fallback["results"]) >= 1)
+    check("fallback reports filtered=false", fallback["retrieval"].get("temporal_filtered") is False)
+    check("fallback still reports the window", fallback["retrieval"].get("temporal_window") is not None)
+
+    # No date in the query => no filtering at all.
+    plain = eng.search("note", limit=10, project="p", fusion="rrf", temporal=True)
+    check("no temporal intent keeps all results", len(plain["results"]) == 3)
+    check("no window reported", plain["retrieval"].get("temporal_window") is None)
+
+    # temporal is opt-in: the baseline path must stay unfiltered.
+    baseline = eng.search("memories from today", limit=10, project="p")
+    check("baseline search unaffected by dates", "retrieval" not in baseline)
+
+
+def test_ingest_turns():
+    print("ingest_turns input forms")
+
+    eng = engine()
+    # Regression: the tool schema sends an array of strings, but the engine
+    # assumed every element was a {role, content} dict and raised
+    # AttributeError: 'str' object has no attribute 'get'.
+    result = eng.ingest_turns(
+        turns=[
+            "The parser uses a hand-written lexer for speed",
+            "We decided to keep the parser dependency-free",
+            "ok",
+        ],
+        project="p",
+    )
+    check("array of strings is accepted", result.get("stored") == 2 and result.get("skipped") == 1, f"got {result}")
+
+    check("single string is accepted",
+          bool(eng.ingest_turns(turns="A single string of conversation content long enough to store", project="p")))
+    check("dict turns still accepted",
+          bool(eng.ingest_turns(turns=[{"role": "user", "content": "We decided to pin bun to 1.3 for reproducibility"}], project="p")))
+    check("ingested memories are retrievable", len(eng.timeline(project="p")) >= 3)
+
+
 def test_advanced_retrieval_is_contained():
     print("failure containment")
 
@@ -319,6 +419,9 @@ def main():
         test_rank_fusion,
         test_graph_expansion,
         test_temporal_retrieval,
+        test_timeline_bounds,
+        test_temporal_filtering,
+        test_ingest_turns,
         test_advanced_retrieval_is_contained,
     ):
         test()

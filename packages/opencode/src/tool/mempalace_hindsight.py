@@ -349,7 +349,9 @@ _TEMPORAL_HINT = re.compile(
     re.IGNORECASE,
 )
 
-_YEAR_ONLY = re.compile(r"\b(?:in|during|throughout|year)\s+(?P<year>\d{4})\b(?![-/.]\d)", re.IGNORECASE)
+_YEAR_ONLY = re.compile(r"\b(?:in|during|throughout|year|from)\s+(?P<year>\d{4})\b(?![-/.]\d)", re.IGNORECASE)
+_SINCE_YEAR = re.compile(r"\bsince\s+(?P<year>\d{4})\b(?![-/.]\d)", re.IGNORECASE)
+_EXPLICIT_DATE = re.compile(r"\b(?P<date>\d{4}-\d{2}-\d{2})\b")
 _MONTH_YEAR = re.compile(
     r"\b(?P<month>january|february|march|april|may|june|july|august|september|october|november|december)"
     r"\s+(?P<year>\d{4})\b",
@@ -387,6 +389,23 @@ def extract_temporal_constraint(query, reference_date=None):
     if now.tzinfo is not None:
         now = now.astimezone(timezone.utc).replace(tzinfo=None)
     low = query.lower()
+
+    # A literal ISO date is the most specific form and wins over everything.
+    match = _EXPLICIT_DATE.search(low)
+    if match:
+        try:
+            day = datetime.fromisoformat(match.group("date"))
+            if _plausible_year(day.year, now):
+                return _day_range(day, day)
+        except ValueError:
+            pass
+
+    # "since 2024" is a range from that point to now, not the year itself.
+    match = _SINCE_YEAR.search(low)
+    if match:
+        year = int(match.group("year"))
+        if _plausible_year(year, now):
+            return _day_range(datetime(year, 1, 1), now)
 
     # Explicit "<month> <year>" beats a bare year in the same query.
     match = _MONTH_YEAR.search(low)
@@ -466,7 +485,9 @@ _TEMPORAL_PHRASES = re.compile(
     r"(?:last|past|previous|next|this)\s+\d+\s+(?:hour|day|week|month|year)s?|"
     r"\d+\s+(?:hour|day|week|month|year)s?\s+ago|"
     r"(?:last|past|previous|this)\s+(?:week|month|year|night)|"
-    r"(?:in|during|throughout|year)\s+\d{4}|"
+    r"\d{4}-\d{2}-\d{2}|"
+    r"since\s+\d{4}|"
+    r"(?:in|during|throughout|year|from)\s+\d{4}|"
     r"(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{4}|"
     r"yesterday|today|tonight|recently|recent|this morning|this afternoon"
     r")\b",

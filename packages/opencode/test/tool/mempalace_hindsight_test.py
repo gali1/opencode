@@ -293,6 +293,22 @@ def test_temporal_extraction():
     start, end = extract_temporal_constraint("last year revenue", now)
     check("last year resolves to the prior year", start.year == 2025 and end.year == 2025)
 
+    # Regression: natural phrasings that previously produced no window at all.
+    start, end = extract_temporal_constraint("memories from 2020", now)
+    check("'from <year>' resolves to that year",
+          start.date() == datetime(2020, 1, 1).date() and end.date() == datetime(2020, 12, 31).date())
+
+    start, end = extract_temporal_constraint("since 2024", now)
+    check("'since <year>' spans from that year to now",
+          start.date() == datetime(2024, 1, 1).date() and end.date() == now.date())
+
+    start, end = extract_temporal_constraint("what happened on 2026-10-27", now)
+    check("explicit ISO date resolves to that day",
+          start.date() == datetime(2026, 10, 27).date() and end.date() == datetime(2026, 10, 27).date())
+
+    start, end = extract_temporal_constraint("on 2001-02-03 and 2024", now)
+    check("explicit date outranks a bare year", start.date() == datetime(2001, 2, 3).date())
+
 
 def test_analyze_query():
     print("analyze_query")

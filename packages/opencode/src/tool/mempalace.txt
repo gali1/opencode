@@ -87,8 +87,17 @@ Before the session ends:
   match neither the text nor the vector query. This is how you recover context
   that uses different vocabulary than your question.
 - temporal=true: read a time window out of the query ("yesterday", "last week",
-  "March 2026", "3 days ago") and prefer memories from that period. The time
-  words are removed from the keyword match, so they never suppress results.
+  "March 2026", "3 days ago", "from 2020", "since 2024", "on 2026-10-27") and
+  RESTRICT results to that window (results carry temporal_score; retrieval
+  reports temporal_filtered and temporal_matched). If nothing exists in the
+  window it falls back to the normal ranking rather than returning nothing. The
+  time words are removed from the keyword match, so they never suppress results.
+
+### Listing memories by date
+- memory_timeline: pass start and/or end. Accepts `YYYY-MM-DD` (whole day,
+  inclusive) or ISO `YYYY-MM-DDTHH:MM:SS`; bounds filter by creation time and
+  results are newest first. Use it when the user asks "what did we do on X" or
+  "show memories from last month" and you do not need relevance ranking.
 
 ### Evidence and contradictions (automatic)
 - Storing content that already exists does not create a duplicate; it increments

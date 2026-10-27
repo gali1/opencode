@@ -248,6 +248,33 @@ def _parse_ts(timestamp_str):
     return dt
 
 
+def _normalize_time_bound(value, end=False):
+    """Normalize a caller-supplied time bound to the stored `YYYY-MM-DD HH:MM:SS` form.
+
+    Timestamps are stored with a space separator, so a bound written in ISO form
+    (`2026-10-27T00:00:00`) compares *less than* every stored row
+    (`' ' (0x20) < 'T' (0x54)`), silently turning an inclusive range into an
+    empty one. Bare dates are expanded to the whole day; an end bound lands on
+    the last second so "today" includes everything that happened today.
+    """
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    date_only = re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw) is not None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        # Unknown format: pass through so a raw SQL-friendly string still works.
+        return raw
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    if date_only and end:
+        dt = dt.replace(hour=23, minute=59, second=59)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _quote_fts(query, match_any=False):
     """Build an FTS5 query that tries prefix matching for tokens ≥ 3 chars
     and falls back to exact phrase for short tokens.  Returns empty string
@@ -1285,9 +1312,27 @@ class RekalEngine:
                 if window:
                     start, end = window
                     meta["temporal_window"] = [start.isoformat(), end.isoformat()]
+                    in_window = set()
                     for entry in scored:
                         created = _parse_ts(entry.get("created_at"))
                         proximity[entry["id"]] = _hs.temporal_proximity(created, start, end)
+                        if created is not None and start <= created <= end:
+                            in_window.add(entry["id"])
+                    # A date in the query is a constraint, not a hint. Ranking
+                    # alone cannot express "memories from today": a stronger
+                    # match from last month would still outrank today's, which
+                    # is exactly the behaviour that made temporal recall look
+                    # broken. Filter first, then rank inside the window.
+                    matched = [entry for entry in scored if entry["id"] in in_window]
+                    meta["temporal_matched"] = len(matched)
+                    if matched:
+                        scored = matched
+                        meta["temporal_filtered"] = True
+                    else:
+                        # Never turn a date question into an empty result when
+                        # the store simply has nothing from that period; fall
+                        # back to the unfiltered ranking and say so.
+                        meta["temporal_filtered"] = False
                 else:
                     meta["temporal_window"] = None
 
@@ -1593,6 +1638,10 @@ class RekalEngine:
     # ── Timeline ──────────────────────────────────────────────────────
 
     def timeline(self, project=None, start=None, end=None, limit=20):
+        # Normalize before comparing: stored timestamps use a space separator,
+        # so ISO bounds would otherwise exclude every row.
+        start = _normalize_time_bound(start, end=False)
+        end = _normalize_time_bound(end, end=True)
         query = """
             SELECT * FROM memories
             WHERE (? IS NULL OR project = ?)
@@ -1901,6 +1950,12 @@ class RekalEngine:
         """
         if isinstance(turns, str):
             turns = [{"role": "mixed", "content": turns}]
+        # The tool schema sends an array of strings; accept dicts too so the
+        # engine works whether callers pass raw text or {role, content} turns.
+        turns = [
+            turn if isinstance(turn, dict) else {"role": "mixed", "content": str(turn)}
+            for turn in (turns or [])
+        ]
 
         wing = wing or "project"
         room = room or "conversations"
