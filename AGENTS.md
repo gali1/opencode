@@ -159,3 +159,15 @@ const table = sqliteTable("session", {
 - Keep delivery vocabulary explicit. Prompts steer by default and promote at the next safe provider-turn boundary while the current drain requires continuation. An explicit `queue` input remains pending until the Session would otherwise become idle; promote one queued input at that boundary, then reevaluate continuation before promoting another. Promoting any new user input resets the selected agent's provider-turn allowance; a batch of steers resets it once.
 - Keep EventV2 replay owner claims separate from clustered Session execution ownership.
 - Keep the System Context algebra, registry, and built-ins in `src/system-context`; keep Context Source producers with their observed domains, and keep Session History selection plus Context Epoch persistence Session-owned.
+
+## Privileged Commands and Interactive Authentication
+
+- The `bash` tool is **noninteractive**: its stdin/stdout are not a TTY (`[ -t 0 ]` is false). A command that blocks on an
+  interactive password prompt will hang or fail, and there is no way to answer the prompt from this tool.
+- Never ask the user to paste a password, and never put one in a command, pipe, file, or log. Chat and ACP text are not
+  secure credential channels. Do not use `echo ... | sudo -S` or similar as a workaround.
+- When a command genuinely needs elevation or a TTY, tell the user the exact command and ask them to run it in a terminal
+  they control (for example Zed's integrated terminal), where the operating system presents its normal prompt. Resume the
+  task after they confirm.
+- Do not assume a command is impossible just because it needs authentication, and do not silently skip it. Probe first
+  (`sudo -n true`, `[ -t 0 ]`), then report the specific blocker and the next safe step.

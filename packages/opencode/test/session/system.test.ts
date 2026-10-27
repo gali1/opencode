@@ -165,4 +165,33 @@ describe("session.system", () => {
       )
     }),
   )
+
+  // The shared block is prepended to every provider prompt, so it is the one
+  // place that can correct the failure mode where a model declares a task
+  // impossible (or silently skips it) merely because it could not authenticate.
+  test("shared privilege guidance covers secure authentication handling", () => {
+    const guidance = SystemPrompt.PRIVILEGE_GUIDANCE
+
+    expect(guidance).toContain("<privilege_escalation>")
+    expect(guidance).toContain("</privilege_escalation>")
+
+    // Must teach the model to probe for a TTY instead of assuming.
+    expect(guidance).toContain("[ -t 0 ]")
+    expect(guidance).toContain("no TTY")
+
+    // Must forbid handling secrets through chat/ACP or command strings.
+    expect(guidance).toContain("Never transmit, echo, pipe, log, or store a password")
+    expect(guidance).toContain("not secure credential channels")
+
+    // Must give a concrete fallback and require resuming the task.
+    expect(guidance).toContain("integrated terminal")
+    expect(guidance).toContain("resume the original task")
+
+    // Must distinguish a tool limitation from an impossible operation.
+    expect(guidance).toContain("cannot authenticate through this tool")
+    expect(guidance).toContain("from \"impossible\"")
+
+    // Must not suggest weakening the system's security policy.
+    expect(guidance).toContain("weaken security policy")
+  })
 })

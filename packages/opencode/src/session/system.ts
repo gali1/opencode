@@ -58,6 +58,26 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
 
+// Shared by every provider prompt. Kept short because it is prepended to every
+// request: the goal is to stop the model from declaring an operation impossible
+// (or silently skipping it) when it merely could not authenticate.
+export const PRIVILEGE_GUIDANCE = [
+  `<privilege_escalation>`,
+  `Some commands need elevated permissions or another one-time authorization.`,
+  `- Check what this execution tool can do before concluding a task is impossible. A noninteractive`,
+  `  shell (no TTY) cannot answer an interactive password prompt; an interactive terminal or a`,
+  `  user-run command can. Test with \`[ -t 0 ]\` rather than guessing.`,
+  `- Never transmit, echo, pipe, log, or store a password or other secret, and never ask the user to`,
+  `  paste one into chat. Chat and ACP text are not secure credential channels.`,
+  `- If this tool cannot complete authentication, say exactly which command needs elevation and ask`,
+  `  the user to run it in a terminal they control (for example the editor's integrated terminal).`,
+  `  Then resume the original task once they confirm.`,
+  `- Distinguish "cannot authenticate through this tool" from "impossible". State the specific`,
+  `  blocker and the next safe step; do not silently skip the operation or blame Zed/ACP broadly.`,
+  `- Do not invent capabilities, weaken security policy, or retry rejected credentials repeatedly.`,
+  `</privilege_escalation>`,
+].join("\n")
+
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -98,6 +118,8 @@ const layer = Layer.effect(
             `- Significant discoveries, architecture decisions, and resolved bugs are automatically stored after each response.`,
             `- You can proactively store or search memory using the mempalace tool when automatic retrieval is insufficient.`,
             `</memory_system>`,
+            ``,
+            PRIVILEGE_GUIDANCE,
           ].join("\n"),
           references.length === 0
             ? undefined
