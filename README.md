@@ -101,6 +101,42 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 
 If you want to run this fork (with MemPalace integration) instead of the official release, build and install from source. This replaces any existing `opencode` command on your system.
 
+#### One-command install (recommended)
+
+```bash
+git clone https://github.com/gali1/opencode.git
+cd opencode
+./script/install-source.sh
+```
+
+The installer checks prerequisites, builds the single-file binary, installs it
+alongside its companion Python modules, and verifies the result. It asks two
+independent optional questions first:
+
+| Prompt | Adds | If skipped |
+| --- | --- | --- |
+| **MemPalace** | External `mempalace` package: semantic search over past context, knowledge graph, session diary, project-scoped drawers | OpenCode works; no vector recall or knowledge graph |
+| **Memory enhancement** | Bundled structured memory: typed entries with lifecycle, rank-fusion retrieval, associative recall, time windows, contradiction detection, evidence accumulation | OpenCode works; no structured/advanced memory |
+
+Both default to **no**: press `Enter` (or `N`/`n`) to skip, or answer `Y`/`y`/`yes`
+to install. The choices are independent, and the enhancement works on its own
+using SQLite keyword search (selecting MemPalace too adds semantic recall).
+
+Non-interactive use:
+
+```bash
+./script/install-source.sh --non-interactive          # decline both
+./script/install-source.sh --yes                      # accept both
+./script/install-source.sh --mempalace=no --memory=yes
+./script/install-source.sh --install-dir "$HOME/.opencode/bin" --no-modify-path
+```
+
+Provider credentials are discovered from environment variables at runtime and
+are never written to disk by the installer. See `./script/install-source.sh --help`
+for all options.
+
+The manual steps below remain available and are what the script automates.
+
 #### Prerequisites
 
 - [Bun](https://bun.sh) v1.1+ (`curl -fsSL https://bun.sh/install | bash`)

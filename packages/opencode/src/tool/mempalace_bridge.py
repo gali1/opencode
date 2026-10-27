@@ -15,6 +15,43 @@ if data_dir:
     os.makedirs(data_dir, exist_ok=True)
     os.environ["MEMPALACE_PALACE_PATH"] = data_dir
 
+# ── Optional capability flags ────────────────────────────────────────────
+# The source installer records which optional memory components the user
+# selected.  Two capabilities are independent:
+#   "mempalace"    — the external `mempalace` package: drawers, ChromaDB
+#                    semantic search, knowledge graph, diary.
+#   "enhancement"  — the bundled Rekal structured-memory engine and its
+#                    Hindsight retrieval (RRF fusion, graph expansion,
+#                    temporal windows, contradiction detection, evidence).
+# A missing file means "both enabled", which preserves the behaviour of every
+# installation made before this file existed.
+_MEMORY_FLAGS = {"mempalace": True, "enhancement": True}
+
+
+def _load_memory_flags():
+    candidates = []
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        candidates.append(os.path.join(xdg, "opencode", "memory-config.json"))
+    candidates.append(os.path.join(os.path.expanduser("~"), ".local", "share", "opencode", "memory-config.json"))
+    for path in candidates:
+        try:
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                for key in ("mempalace", "enhancement"):
+                    if key in data:
+                        _MEMORY_FLAGS[key] = bool(data[key])
+            return
+        except Exception as exc:  # a malformed file must never break memory
+            sys.stderr.write(f"[mempalace] ignoring unreadable memory-config.json: {exc}\n")
+            return
+
+
+_load_memory_flags()
+
 # ── Stdout protection ────────────────────────────────────────────────────
 _REAL_STDOUT = sys.stdout
 _REAL_STDOUT_FD = None
@@ -51,29 +88,34 @@ except Exception as e:
 _ENGINE = None
 _ENGINE_ERROR = None
 
-if _IMPORT_ERROR is None:
-    try:
-        import importlib.util
-        _bridge_dir = os.path.dirname(os.path.abspath(__file__))
-        _spec = importlib.util.spec_from_file_location(
-            "mempalace_rekal_engine",
-            os.path.join(_bridge_dir, "mempalace_rekal_engine.py"),
-        )
-        _engine_mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_engine_mod)
-        _RekalEngine = _engine_mod.RekalEngine
+# The Rekal engine is bundled with OpenCode and does not require the external
+# `mempalace` package: its ChromaDB vector arm and knowledge-graph arm are
+# already best-effort, so without MemPalace it runs on SQLite FTS5 alone.
+# Loading it unconditionally is what makes the two optional memory features
+# genuinely independent — before this, a missing MemPalace package disabled the
+# engine too, so "enhancement without mempalace" was impossible.
+try:
+    import importlib.util
+    _bridge_dir = os.path.dirname(os.path.abspath(__file__))
+    _spec = importlib.util.spec_from_file_location(
+        "mempalace_rekal_engine",
+        os.path.join(_bridge_dir, "mempalace_rekal_engine.py"),
+    )
+    _engine_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_engine_mod)
+    _RekalEngine = _engine_mod.RekalEngine
 
-        if _config and hasattr(_config, 'palace_path') and not _config.palace_path:
-            _config.palace_path = data_dir
-        palace_path = (_config.palace_path if _config else data_dir) or data_dir
-        _ENGINE = _RekalEngine(
-            data_dir=data_dir,
-            palace_path=palace_path,
-            kg=_kg,
-            search_memories_fn=_search_memories,
-        )
-    except Exception as e:
-        _ENGINE_ERROR = str(e)
+    if _config and hasattr(_config, 'palace_path') and not _config.palace_path:
+        _config.palace_path = data_dir
+    palace_path = (_config.palace_path if _config else data_dir) or data_dir
+    _ENGINE = _RekalEngine(
+        data_dir=data_dir,
+        palace_path=palace_path,
+        kg=_kg,
+        search_memories_fn=_search_memories,
+    )
+except Exception as e:
+    _ENGINE_ERROR = str(e)
 
 # ── Restore stdout ───────────────────────────────────────────────────────
 if _REAL_STDOUT_FD is not None:
@@ -389,15 +431,48 @@ def _write(response):
     sys.stdout.flush()
 
 
-def main():
-    if _IMPORT_ERROR is not None:
-        _write({"status": "error", "message": f"mempalace import failed: {_IMPORT_ERROR}. Install with: pip install mempalace"})
-        sys.exit(1)
+def _capability_error(op):
+    """Return an error response when `op` needs a capability that is absent.
 
+    Checks both the installer's opt-in flags and, for native operations, actual
+    package availability, so the agent always gets an actionable message instead
+    of a traceback or a silently empty result.
+    """
+    if op in NATIVE_OPS:
+        if not _MEMORY_FLAGS["mempalace"]:
+            return {"error": "MemPalace is disabled (declined during installation). Re-run the source installer to enable it."}
+        if _IMPORT_ERROR is not None:
+            return {"error": f"MemPalace is not installed: {_IMPORT_ERROR}. Install with: pip install mempalace"}
+    if op in ENGINE_OPS and not _MEMORY_FLAGS["enhancement"]:
+        return {"error": "Memory enhancement is disabled (declined during installation). Re-run the source installer to enable it."}
+    return None
+
+
+# Operations backed by the external MemPalace package vs. the bundled engine.
+NATIVE_OPS = frozenset({
+    "search", "smart_search", "store", "status", "list_wings", "list_rooms",
+    "kg_add", "kg_query", "kg_invalidate", "diary_write", "diary_read",
+})
+ENGINE_OPS = frozenset({
+    "memory_store", "memory_search", "memory_recall", "memory_update",
+    "memory_supersede", "memory_delete", "memory_link", "build_context",
+    "memory_conflicts", "memory_health", "memory_similar", "memory_topics",
+    "memory_timeline", "memory_related", "contradiction_check", "fact_check",
+    "multi_hop", "set_config", "session_init", "ingest_turns",
+})
+
+
+def main():
+    enabled = [name for name, on in _MEMORY_FLAGS.items() if on]
     status = "ready"
-    if _ENGINE_ERROR:
-        status = f"ready (rekal engine unavailable: {_ENGINE_ERROR})"
-    _write({"status": "ok", "data": status})
+    if not enabled:
+        status = "ready (all optional memory features disabled)"
+    elif _IMPORT_ERROR is not None and _MEMORY_FLAGS["mempalace"]:
+        # MemPalace is optional: the bundled enhancement keeps working without it.
+        status = f"ready (mempalace unavailable: {_IMPORT_ERROR})"
+    elif _ENGINE_ERROR:
+        status = f"ready (memory enhancement unavailable: {_ENGINE_ERROR})"
+    _write({"status": "ok", "data": status, "capabilities": dict(_MEMORY_FLAGS), "mempalace": _IMPORT_ERROR is None})
 
     for line in sys.stdin:
         line = line.strip()
@@ -407,8 +482,11 @@ def main():
             request = json.loads(line)
             op = request.get("operation")
             handler = HANDLERS.get(op)
+            blocked = _capability_error(op) if handler is not None else None
             if handler is None:
                 response = {"status": "error", "message": f"Unknown operation: {op}. Valid: {', '.join(sorted(HANDLERS.keys()))}"}
+            elif blocked is not None:
+                response = {"status": "error", "message": blocked["error"]}
             else:
                 result = handler(request)
                 response = {"status": "ok", "data": result}
